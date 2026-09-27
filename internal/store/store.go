@@ -1,54 +1,58 @@
 package store
 
 import (
-	"sort"
+	"fmt"
 	"sync"
 )
 
-type Store struct {
-	mu sync.RWMutex
+type CommandType string
+
+const (
+	CommandTypeSet    CommandType = "set"
+	CommandTypeGet    CommandType = "get"
+	CommandTypeDelete CommandType = "delete"
+	CommandTypeClear  CommandType = "clear"
+)
+
+type Command struct {
+	Type  CommandType
+	Key   string
+	Value string
+}
+
+type StateMachine struct {
+	mu   sync.RWMutex
 	data map[string]string
 }
 
-func NewStore() *Store {
-	return &Store{
+func NewStateMachine() *StateMachine {
+	return &StateMachine{
 		data: make(map[string]string),
 	}
 }
 
-
-func (s *Store) Set(key, value string){
+func (s *StateMachine) Apply(cmd Command) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.data[key] = value
-}
 
-func (s *Store) Get(key string) string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.data[key]
-}
+	switch cmd.Type {
+	case CommandTypeSet:
+		s.data[cmd.Key] = cmd.Value
+	case CommandTypeDelete:
+		delete(s.data, cmd.Key)
+	case CommandTypeClear:
+		s.data = make(map[string]string)
+	default:
+		return fmt.Errorf("invalid command type: %s", cmd.Type)
+	}
 
-func (s *Store) Delete(key string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.data, key)
 	return nil
 }
 
-func (s *Store) List() []string {
+func (s *StateMachine) Get(key string) (string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	keys := make([]string, 0, len(s.data))
-	for key := range s.data {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
-}
 
-func (s *Store) Len() int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return len(s.data)
+	value, ok := s.data[key]
+	return value, ok
 }
