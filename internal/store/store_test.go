@@ -19,7 +19,7 @@ func TestApplySetAndGet(t *testing.T) {
 	sm := NewStateMachine()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := sm.Apply(Command{Type: CommandTypeSet, Key: tt.key, Value: tt.value}); err != nil {
+			if err := sm.Apply(Command{Type: CommandTypePut, Key: tt.key, Value: tt.value}); err != nil {
 				t.Fatalf("Apply set: %v", err)
 			}
 			got, ok := sm.Get(tt.key)
@@ -43,7 +43,7 @@ func TestGetMissingKey(t *testing.T) {
 
 func TestApplyDelete(t *testing.T) {
 	sm := NewStateMachine()
-	if err := sm.Apply(Command{Type: CommandTypeSet, Key: "a", Value: "1"}); err != nil {
+	if err := sm.Apply(Command{Type: CommandTypePut, Key: "a", Value: "1"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := sm.Apply(Command{Type: CommandTypeDelete, Key: "a"}); err != nil {
@@ -65,7 +65,7 @@ func TestApplyDeleteMissingKey(t *testing.T) {
 func TestApplyClear(t *testing.T) {
 	sm := NewStateMachine()
 	for _, kv := range []struct{ k, v string }{{"a", "1"}, {"b", "2"}} {
-		if err := sm.Apply(Command{Type: CommandTypeSet, Key: kv.k, Value: kv.v}); err != nil {
+		if err := sm.Apply(Command{Type: CommandTypePut, Key: kv.k, Value: kv.v}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -100,7 +100,7 @@ func TestConcurrentSetSameKey(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < iterations; i++ {
 				val := string(rune('a' + (g+i)%26))
-				_ = sm.Apply(Command{Type: CommandTypeSet, Key: "hot", Value: val})
+				_ = sm.Apply(Command{Type: CommandTypePut, Key: "hot", Value: val})
 			}
 		}()
 	}
@@ -117,7 +117,7 @@ func TestConcurrentSetSameKey(t *testing.T) {
 
 func TestGetConcurrentWithSet(t *testing.T) {
 	sm := NewStateMachine()
-	if err := sm.Apply(Command{Type: CommandTypeSet, Key: "x", Value: "start"}); err != nil {
+	if err := sm.Apply(Command{Type: CommandTypePut, Key: "x", Value: "start"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -126,7 +126,7 @@ func TestGetConcurrentWithSet(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 200; i++ {
-			_ = sm.Apply(Command{Type: CommandTypeSet, Key: "x", Value: "v"})
+			_ = sm.Apply(Command{Type: CommandTypePut, Key: "x", Value: "v"})
 		}
 	}()
 	go func() {

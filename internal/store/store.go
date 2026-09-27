@@ -8,7 +8,7 @@ import (
 type CommandType string
 
 const (
-	CommandTypeSet    CommandType = "set"
+	CommandTypePut    CommandType = "put"
 	CommandTypeGet    CommandType = "get"
 	CommandTypeDelete CommandType = "delete"
 	CommandTypeClear  CommandType = "clear"
@@ -36,7 +36,7 @@ func (s *StateMachine) Apply(cmd Command) error {
 	defer s.mu.Unlock()
 
 	switch cmd.Type {
-	case CommandTypeSet:
+	case CommandTypePut:
 		s.data[cmd.Key] = cmd.Value
 	case CommandTypeDelete:
 		delete(s.data, cmd.Key)
