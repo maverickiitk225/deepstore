@@ -21,9 +21,15 @@ const (
 	opDelete byte = 2
 )
 
+// formatVersion is the payload version written by Encode.
+// A later version can add fields such as Raft term; this one is rejected
+// rather than parsed as that layout.
+const formatVersion byte = 2
+
 const maxPayloadSize uint32 = 16 << 20
 
 type Record struct {
+	Index  uint64
 	OpType OpType
 	Key    string
 	Value  string
@@ -37,6 +43,9 @@ func (r Record) Encode() ([]byte, error) {
 	op, err := encodeOp(r.OpType)
 	if err != nil {
 		return nil, err
+	}
+	if r.Index == 0 {
+		return nil, fmt.Errorf("wal: index must be positive")
 	}
 
 	key := []byte(r.Key)
@@ -52,14 +61,15 @@ func (r Record) Encode() ([]byte, error) {
 		return nil, fmt.Errorf("wal: value too long")
 	}
 
-	payloadLen := 1 + 4 + len(key) + 4 + len(value)
+	payloadLen := 1 + 8 + 1 + 4 + len(key) + 4 + len(value)
 	if payloadLen > int(maxPayloadSize) {
 		return nil, fmt.Errorf("wal: payload too long")
 	}
 	payload := make([]byte, payloadLen)
-	off := 0
-	payload[off] = op
-	off++
+	payload[0] = formatVersion
+	binary.LittleEndian.PutUint64(payload[1:9], r.Index)
+	payload[9] = op
+	off := 10
 	binary.LittleEndian.PutUint32(payload[off:], uint32(len(key)))
 	off += 4
 	copy(payload[off:], key)
@@ -100,12 +110,19 @@ func (r *Record) Decode(data []byte) error {
 		return errCRCMismatch
 	}
 
-	if len(payload) < 1+4+4 {
+	if len(payload) < 1 {
+		return fmt.Errorf("wal: payload too short")
+	}
+	if payload[0] != formatVersion {
+		return fmt.Errorf("wal: unknown version: %d", payload[0])
+	}
+	if len(payload) < 1+8+1+4+4 {
 		return fmt.Errorf("wal: payload too short")
 	}
 
-	op := payload[0]
-	off := 1
+	index := binary.LittleEndian.Uint64(payload[1:9])
+	op := payload[9]
+	off := 10
 	keyLen := binary.LittleEndian.Uint32(payload[off:])
 	off += 4
 	if keyLen == 0 {
@@ -138,6 +155,7 @@ func (r *Record) Decode(data []byte) error {
 		return err
 	}
 
+	r.Index = index
 	r.OpType = opType
 	r.Key = string(key)
 	r.Value = string(value)

@@ -217,6 +217,9 @@ func TestEngineSyncFailurePoisons(t *testing.T) {
 	if _, ok := e.Get("lost"); ok {
 		t.Fatal("Get(lost) after failed sync: ok = true, want false")
 	}
+	if e.LastIndex() != 1 || e.AppliedIndex() != 1 {
+		t.Fatalf("indexes after failed sync = (%d, %d), want (1, 1)", e.LastIndex(), e.AppliedIndex())
+	}
 	if v, ok := e.Get("ok"); !ok || v != "1" {
 		t.Fatalf("Get(ok) = (%q, %v), want (1, true)", v, ok)
 	}
@@ -263,5 +266,48 @@ func TestEngineSyncFailurePoisons(t *testing.T) {
 	}
 	if v, ok := e.Get("lost"); !ok || v != "2" {
 		t.Fatalf("Get(lost) after reopen = (%q, %v), want (2, true)", v, ok)
+	}
+}
+
+func TestEngineIndexMonotonic(t *testing.T) {
+	dir := t.TempDir()
+
+	e, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.LastIndex() != 0 || e.AppliedIndex() != 0 {
+		t.Fatalf("indexes on empty engine = (%d, %d), want (0, 0)", e.LastIndex(), e.AppliedIndex())
+	}
+	if err := e.Put("a", "1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Put("b", "2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Delete("a"); err != nil {
+		t.Fatal(err)
+	}
+	if e.LastIndex() != 3 || e.AppliedIndex() != 3 {
+		t.Fatalf("indexes after three writes = (%d, %d), want (3, 3)", e.LastIndex(), e.AppliedIndex())
+	}
+	if err := e.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	e, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+
+	if e.LastIndex() != 3 || e.AppliedIndex() != 3 {
+		t.Fatalf("indexes after reopen = (%d, %d), want (3, 3)", e.LastIndex(), e.AppliedIndex())
+	}
+	if _, ok := e.Get("a"); ok {
+		t.Fatal("Get(a) after delete reopen: ok = true, want false")
+	}
+	if v, ok := e.Get("b"); !ok || v != "2" {
+		t.Fatalf("Get(b) = (%q, %v), want (2, true)", v, ok)
 	}
 }

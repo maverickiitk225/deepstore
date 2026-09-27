@@ -22,13 +22,14 @@ One record is one atomic mutation. Length-prefix so you know how many bytes to r
    4B        4B       length bytes
 
 payload:
-[ op:1B ][ key_len:4B ][ key ][ val_len:4B ][ value ]
+[ version:1B ][ index:8B ][ op:1B ][ key_len:4B ][ key ][ val_len:4B ][ value ]
 ```
 
+- `version`: `2`. Any other version is corruption.
+- `index`: unsigned 64-bit, starting at 1. Each record must be the previous index plus 1. A gap or a repeat is corruption, not a torn tail.
 - `op`: `1` = Put, `2` = Delete. Delete still carries `val_len = 0`.
 - `crc32`: IEEE CRC of `length || payload` (not including the CRC field).
 - Integers: unsigned, little-endian.
-- No record sequence number yet. File order is the total order.
 
 Reject empty keys. Copy value bytes out of the read buffer so later reads cannot alias WAL pages.
 

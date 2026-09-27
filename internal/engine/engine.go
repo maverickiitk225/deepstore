@@ -9,11 +9,13 @@ import (
 )
 
 type Engine struct {
-	wal      *wal.WAL
-	sm       *store.StateMachine
-	mu       sync.Mutex
-	closed   bool
-	poisoned error
+	wal          *wal.WAL
+	sm           *store.StateMachine
+	mu           sync.Mutex
+	closed       bool
+	poisoned     error
+	lastIndex    uint64
+	appliedIndex uint64
 }
 
 func Open(dir string) (*Engine, error) {
@@ -28,7 +30,12 @@ func Open(dir string) (*Engine, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Engine{wal: w, sm: sm}, nil
+	return &Engine{
+		wal:          w,
+		sm:           sm,
+		lastIndex:    w.LastIndex(),
+		appliedIndex: w.LastIndex(),
+	}, nil
 }
 
 func (e *Engine) Put(key, value string) error {
@@ -52,6 +59,7 @@ func (e *Engine) commit(rec wal.Record) error {
 		return err
 	}
 
+	rec.Index = e.lastIndex + 1
 	if err := e.wal.Append(rec); err != nil {
 		return err
 	}
@@ -63,7 +71,24 @@ func (e *Engine) commit(rec wal.Record) error {
 	if err != nil {
 		return err
 	}
-	return e.sm.Apply(cmd)
+	if err := e.sm.Apply(cmd); err != nil {
+		return err
+	}
+	e.lastIndex = rec.Index
+	e.appliedIndex = rec.Index
+	return nil
+}
+
+func (e *Engine) LastIndex() uint64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.lastIndex
+}
+
+func (e *Engine) AppliedIndex() uint64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.appliedIndex
 }
 
 func (e *Engine) errIfNotWritable() error {

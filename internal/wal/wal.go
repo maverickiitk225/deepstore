@@ -12,9 +12,10 @@ import (
 const walFileName = "wal.log"
 
 type WAL struct {
-	path   string
-	f      *os.File
-	syncFn func() error
+	path      string
+	f         *os.File
+	syncFn    func() error
+	lastIndex uint64
 }
 
 func Open(dir string, apply func(Record) error) (*WAL, error) {
@@ -48,7 +49,14 @@ func Open(dir string, apply func(Record) error) (*WAL, error) {
 	return w, nil
 }
 
+func (w *WAL) LastIndex() uint64 {
+	return w.lastIndex
+}
+
 func (w *WAL) Append(r Record) error {
+	if r.Index != w.lastIndex+1 {
+		return fmt.Errorf("wal: index %d, want %d", r.Index, w.lastIndex+1)
+	}
 	frame, err := r.Encode()
 	if err != nil {
 		return err
@@ -60,6 +68,7 @@ func (w *WAL) Append(r Record) error {
 	if n != len(frame) {
 		return fmt.Errorf("wal: short write: wrote %d of %d bytes", n, len(frame))
 	}
+	w.lastIndex = r.Index
 	return nil
 }
 
@@ -99,6 +108,7 @@ func (w *WAL) recover(apply func(Record) error) (int64, error) {
 	}
 
 	var lastGood int64
+	var lastIndex uint64
 	header := make([]byte, 8)
 
 	for {
@@ -157,6 +167,9 @@ func (w *WAL) recover(apply func(Record) error) (int64, error) {
 			}
 			return lastGood, fmt.Errorf("wal: corrupt record at offset %d: %w", offset, err)
 		}
+		if rec.Index != lastIndex+1 {
+			return lastGood, fmt.Errorf("wal: corrupt record at offset %d: index %d, want %d", offset, rec.Index, lastIndex+1)
+		}
 
 		if apply != nil {
 			if err := apply(rec); err != nil {
@@ -164,6 +177,7 @@ func (w *WAL) recover(apply func(Record) error) (int64, error) {
 			}
 		}
 
+		lastIndex = rec.Index
 		lastGood = offset + int64(len(frame))
 	}
 
@@ -173,6 +187,7 @@ func (w *WAL) recover(apply func(Record) error) (int64, error) {
 	if _, err := w.f.Seek(lastGood, io.SeekStart); err != nil {
 		return lastGood, fmt.Errorf("wal: seek end: %w", err)
 	}
+	w.lastIndex = lastIndex
 	return lastGood, nil
 }
 
