@@ -5,3 +5,5 @@ Educational project: a practical, linearizable key-value store. The end goal is 
 Phase 1 durability: one Put/Delete is one log record, `fsync` before ack, replay on restart. Isolation is one-key linearizability, not SNAPSHOT or SSI.
 
 See [docs/phase1-engine.md](docs/phase1-engine.md) for the record layout, fsync policy, and what an ack means.
+
+Phase 2 turns the engine into a long-running server with log indices, group commit, client sessions, snapshots and a linearizability test harness. See [docs/phase2-node.md](docs/phase2-node.md).
