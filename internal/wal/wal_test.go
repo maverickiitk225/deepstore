@@ -1,6 +1,8 @@
 package wal
 
 import (
+	"encoding/binary"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -160,5 +162,60 @@ func TestWALCorruptMiddleFails(t *testing.T) {
 	_, err = Open(dir, func(r Record) error { return nil })
 	if err == nil {
 		t.Fatal("Open corrupt wal: err = nil, want error")
+	}
+}
+
+func TestWALPayloadLengthOverMaxIsCorruption(t *testing.T) {
+	for _, length := range []uint32{maxPayloadSize + 1, ^uint32(0)} {
+		t.Run(fmt.Sprintf("%d", length), func(t *testing.T) {
+			dir := t.TempDir()
+
+			w, err := Open(dir, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := w.Append(Record{OpType: OpTypePut, Key: "ok", Value: "1"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := w.Sync(); err != nil {
+				t.Fatal(err)
+			}
+			if err := w.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			path := filepath.Join(dir, walFileName)
+			f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var hdr [8]byte
+			binary.LittleEndian.PutUint32(hdr[4:8], length)
+			if _, err := f.Write(hdr[:]); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := info.Size()
+
+			_, err = Open(dir, func(Record) error { return nil })
+			if err == nil {
+				t.Fatal("Open oversized length: err = nil, want error")
+			}
+
+			info, err = os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Size() != before {
+				t.Fatalf("wal size = %d, want %d", info.Size(), before)
+			}
+		})
 	}
 }

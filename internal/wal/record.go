@@ -18,6 +18,10 @@ const (
 	opDelete byte = 2
 )
 
+// maxPayloadSize is the largest payload recover will allocate.
+// A header length above this is corruption, not a torn tail.
+const maxPayloadSize uint32 = 16 << 20
+
 type Record struct {
 	OpType OpType
 	Key    string
@@ -48,6 +52,9 @@ func (r Record) Encode() ([]byte, error) {
 	}
 
 	payloadLen := 1 + 4 + len(key) + 4 + len(value)
+	if payloadLen > int(maxPayloadSize) {
+		return nil, fmt.Errorf("wal: payload too long")
+	}
 	payload := make([]byte, payloadLen)
 	off := 0
 	payload[off] = op
@@ -78,6 +85,9 @@ func (r *Record) Decode(data []byte) error {
 
 	storedCRC := binary.LittleEndian.Uint32(data[0:4])
 	payloadLen := binary.LittleEndian.Uint32(data[4:8])
+	if payloadLen > maxPayloadSize {
+		return fmt.Errorf("wal: payload length %d exceeds max %d", payloadLen, maxPayloadSize)
+	}
 	if int(payloadLen) > len(data)-8 {
 		return fmt.Errorf("wal: length exceeds frame")
 	}

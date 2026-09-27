@@ -111,6 +111,9 @@ func (w *WAL) recover(apply func(Record) error) (int64, error) {
 		}
 
 		payloadLen := binary.LittleEndian.Uint32(header[4:8])
+		if payloadLen > maxPayloadSize {
+			return lastGood, fmt.Errorf("wal: corrupt record at offset %d: payload length %d exceeds max %d", offset, payloadLen, maxPayloadSize)
+		}
 		payload := make([]byte, payloadLen)
 		_, err = io.ReadFull(w.f, payload)
 		if err == io.EOF || err == io.ErrUnexpectedEOF {

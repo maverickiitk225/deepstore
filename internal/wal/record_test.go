@@ -2,6 +2,7 @@ package wal
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 )
 
@@ -42,6 +43,13 @@ func TestEncodeEmptyKey(t *testing.T) {
 	_, err := Record{OpType: OpTypePut, Key: "", Value: "v"}.Encode()
 	if err == nil {
 		t.Fatal("Encode empty key: err = nil, want error")
+	}
+}
+
+func TestEncodePayloadTooLong(t *testing.T) {
+	_, err := Record{OpType: OpTypePut, Key: "k", Value: strings.Repeat("x", int(maxPayloadSize))}.Encode()
+	if err == nil {
+		t.Fatal("Encode oversized payload: err = nil, want error")
 	}
 }
 
