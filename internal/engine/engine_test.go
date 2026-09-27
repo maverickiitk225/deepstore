@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -194,5 +195,73 @@ func TestEngineCloseWaitsForInFlightPuts(t *testing.T) {
 	}
 	if _, ok := e.Get("after"); ok {
 		t.Fatal("Put after Close was persisted")
+	}
+}
+
+func TestEngineSyncFailurePoisons(t *testing.T) {
+	dir := t.TempDir()
+
+	e, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Put("ok", "1"); err != nil {
+		t.Fatal(err)
+	}
+
+	e.setSyncHook(func() error { return fmt.Errorf("disk failed") })
+
+	if err := e.Put("lost", "2"); err == nil {
+		t.Fatal("Put during sync failure: err = nil, want error")
+	}
+	if _, ok := e.Get("lost"); ok {
+		t.Fatal("Get(lost) after failed sync: ok = true, want false")
+	}
+	if v, ok := e.Get("ok"); !ok || v != "1" {
+		t.Fatalf("Get(ok) = (%q, %v), want (1, true)", v, ok)
+	}
+
+	path := filepath.Join(dir, "wal.log")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sizeAfterFailure := info.Size()
+
+	err = e.Put("later", "3")
+	if err == nil || !strings.Contains(err.Error(), "poisoned") {
+		t.Fatalf("Put after poison: err = %v, want poisoned", err)
+	}
+	err = e.Delete("ok")
+	if err == nil || !strings.Contains(err.Error(), "poisoned") {
+		t.Fatalf("Delete after poison: err = %v, want poisoned", err)
+	}
+
+	info, err = os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != sizeAfterFailure {
+		t.Fatalf("wal size = %d, want %d", info.Size(), sizeAfterFailure)
+	}
+
+	if err := e.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	e, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+
+	if v, ok := e.Get("ok"); !ok || v != "1" {
+		t.Fatalf("Get(ok) after reopen = (%q, %v), want (1, true)", v, ok)
+	}
+	if _, ok := e.Get("later"); ok {
+		t.Fatal("Get(later) after reopen: ok = true, want false")
+	}
+	if v, ok := e.Get("lost"); !ok || v != "2" {
+		t.Fatalf("Get(lost) after reopen = (%q, %v), want (2, true)", v, ok)
 	}
 }

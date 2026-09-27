@@ -22,11 +22,7 @@ Raft papers assume these already exist. If they do not, you end up debugging fiv
 
 Small things worth fixing before building on top:
 
-- **Poison on `Sync` failure.** Your doc says "treat the process as unsafe", but the engine just returns the error and keeps accepting writes. After an `fsync` error the page cache state is unknown (see "fsyncgate"). Make the engine refuse all further writes until restart.
-- **Bounded record length.** `recover` does `make([]byte, payloadLen)` on an unverified length. A garbage header can ask for 4 GiB. Pick a max record size and treat anything larger as corruption.
 - **Torn tail that looks complete.** Some filesystems extend the file (zeros / garbage) before data lands. The last record can then have a full length but a bad CRC. Decide the rule: bad CRC on the *final* record = torn tail (truncate); bad CRC followed by valid records = corruption (refuse). etcd and Postgres make this distinction.
-- **Dead enum values.** `OpTypeClear`, `CommandTypeGet`, `CommandTypeClear` exist but are not in the on-disk format. Either give them an op byte or remove them; the log format is a contract.
-- **`Engine.Close` vs in-flight writes.** Close does not take the mutex.
 
 ## 1. Long-running server
 

@@ -9,10 +9,11 @@ import (
 )
 
 type Engine struct {
-	wal    *wal.WAL
-	sm     *store.StateMachine
-	mu     sync.Mutex
-	closed bool
+	wal      *wal.WAL
+	sm       *store.StateMachine
+	mu       sync.Mutex
+	closed   bool
+	poisoned error
 }
 
 func Open(dir string) (*Engine, error) {
@@ -34,18 +35,28 @@ func (e *Engine) Put(key, value string) error {
 	if key == "" {
 		return fmt.Errorf("engine: empty key")
 	}
+	return e.commit(wal.Record{OpType: wal.OpTypePut, Key: key, Value: value})
+}
 
+func (e *Engine) Delete(key string) error {
+	if key == "" {
+		return fmt.Errorf("engine: empty key")
+	}
+	return e.commit(wal.Record{OpType: wal.OpTypeDelete, Key: key})
+}
+
+func (e *Engine) commit(rec wal.Record) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.closed {
-		return fmt.Errorf("engine: closed")
+	if err := e.errIfNotWritable(); err != nil {
+		return err
 	}
 
-	rec := wal.Record{OpType: wal.OpTypePut, Key: key, Value: value}
 	if err := e.wal.Append(rec); err != nil {
 		return err
 	}
 	if err := e.wal.Sync(); err != nil {
+		e.poisoned = err
 		return err
 	}
 	cmd, err := recordToCommand(rec)
@@ -55,29 +66,20 @@ func (e *Engine) Put(key, value string) error {
 	return e.sm.Apply(cmd)
 }
 
-func (e *Engine) Delete(key string) error {
-	if key == "" {
-		return fmt.Errorf("engine: empty key")
-	}
-
-	e.mu.Lock()
-	defer e.mu.Unlock()
+func (e *Engine) errIfNotWritable() error {
 	if e.closed {
 		return fmt.Errorf("engine: closed")
 	}
+	if e.poisoned != nil {
+		return fmt.Errorf("engine: poisoned: %w", e.poisoned)
+	}
+	return nil
+}
 
-	rec := wal.Record{OpType: wal.OpTypeDelete, Key: key}
-	if err := e.wal.Append(rec); err != nil {
-		return err
-	}
-	if err := e.wal.Sync(); err != nil {
-		return err
-	}
-	cmd, err := recordToCommand(rec)
-	if err != nil {
-		return err
-	}
-	return e.sm.Apply(cmd)
+func (e *Engine) setSyncHook(fn func() error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.wal.SetSyncHook(fn)
 }
 
 func (e *Engine) Get(key string) (string, bool) {

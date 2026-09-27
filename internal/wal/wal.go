@@ -11,8 +11,9 @@ import (
 const walFileName = "wal.log"
 
 type WAL struct {
-	path string
-	f    *os.File
+	path   string
+	f      *os.File
+	syncFn func() error
 }
 
 func Open(dir string, apply func(Record) error) (*WAL, error) {
@@ -61,7 +62,16 @@ func (w *WAL) Append(r Record) error {
 	return nil
 }
 
+func (w *WAL) SetSyncHook(fn func() error) {
+	w.syncFn = fn
+}
+
 func (w *WAL) Sync() error {
+	if w.syncFn != nil {
+		if err := w.syncFn(); err != nil {
+			return fmt.Errorf("wal: sync: %w", err)
+		}
+	}
 	if err := w.f.Sync(); err != nil {
 		return fmt.Errorf("wal: sync: %w", err)
 	}
