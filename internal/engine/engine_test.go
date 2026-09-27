@@ -16,7 +16,7 @@ func TestEnginePutGetReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Put("k", "v"); err != nil {
+	if _, err := e.Put("k", "v"); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.Close(); err != nil {
@@ -42,10 +42,10 @@ func TestEngineDeleteReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Put("k", "v"); err != nil {
+	if _, err := e.Put("k", "v"); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Delete("k"); err != nil {
+	if _, err := e.Delete("k"); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.Close(); err != nil {
@@ -70,10 +70,10 @@ func TestEngineEmptyKey(t *testing.T) {
 	}
 	defer e.Close()
 
-	if err := e.Put("", "v"); err == nil {
+	if _, err := e.Put("", "v"); err == nil {
 		t.Fatal("Put empty key: err = nil, want error")
 	}
-	if err := e.Delete(""); err == nil {
+	if _, err := e.Delete(""); err == nil {
 		t.Fatal("Delete empty key: err = nil, want error")
 	}
 }
@@ -85,10 +85,10 @@ func TestEngineTornTailAfterReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Put("ok", "1"); err != nil {
+	if _, err := e.Put("ok", "1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Put("lost", "2"); err != nil {
+	if _, err := e.Put("lost", "2"); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.Close(); err != nil {
@@ -131,7 +131,7 @@ func TestEngineConcurrentPutSameKey(t *testing.T) {
 		go func(i int) {
 			defer func() { done <- struct{}{} }()
 			val := string(rune('a' + i%26))
-			_ = e.Put("hot", val)
+			_, _ = e.Put("hot", val)
 		}(i)
 	}
 	for i := 0; i < n; i++ {
@@ -159,7 +159,7 @@ func TestEngineCloseWaitsForInFlightPuts(t *testing.T) {
 	for i := 0; i < n; i++ {
 		go func(i int) {
 			defer wg.Done()
-			errs[i] = e.Put(fmt.Sprintf("k%d", i), "v")
+			_, errs[i] = e.Put(fmt.Sprintf("k%d", i), "v")
 		}(i)
 	}
 	if err := e.Close(); err != nil {
@@ -170,10 +170,10 @@ func TestEngineCloseWaitsForInFlightPuts(t *testing.T) {
 	if err := e.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Put("after", "x"); err == nil {
+	if _, err := e.Put("after", "x"); err == nil {
 		t.Fatal("Put after Close: err = nil, want error")
 	}
-	if err := e.Delete("after"); err == nil {
+	if _, err := e.Delete("after"); err == nil {
 		t.Fatal("Delete after Close: err = nil, want error")
 	}
 
@@ -205,13 +205,13 @@ func TestEngineSyncFailurePoisons(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Put("ok", "1"); err != nil {
+	if _, err := e.Put("ok", "1"); err != nil {
 		t.Fatal(err)
 	}
 
 	e.setSyncHook(func() error { return fmt.Errorf("disk failed") })
 
-	if err := e.Put("lost", "2"); err == nil {
+	if _, err := e.Put("lost", "2"); err == nil {
 		t.Fatal("Put during sync failure: err = nil, want error")
 	}
 	if _, ok := e.Get("lost"); ok {
@@ -231,11 +231,11 @@ func TestEngineSyncFailurePoisons(t *testing.T) {
 	}
 	sizeAfterFailure := info.Size()
 
-	err = e.Put("later", "3")
+	_, err = e.Put("later", "3")
 	if err == nil || !strings.Contains(err.Error(), "poisoned") {
 		t.Fatalf("Put after poison: err = %v, want poisoned", err)
 	}
-	err = e.Delete("ok")
+	_, err = e.Delete("ok")
 	if err == nil || !strings.Contains(err.Error(), "poisoned") {
 		t.Fatalf("Delete after poison: err = %v, want poisoned", err)
 	}
@@ -279,13 +279,13 @@ func TestEngineIndexMonotonic(t *testing.T) {
 	if e.LastIndex() != 0 || e.AppliedIndex() != 0 {
 		t.Fatalf("indexes on empty engine = (%d, %d), want (0, 0)", e.LastIndex(), e.AppliedIndex())
 	}
-	if err := e.Put("a", "1"); err != nil {
+	if _, err := e.Put("a", "1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Put("b", "2"); err != nil {
+	if _, err := e.Put("b", "2"); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Delete("a"); err != nil {
+	if _, err := e.Delete("a"); err != nil {
 		t.Fatal(err)
 	}
 	if e.LastIndex() != 3 || e.AppliedIndex() != 3 {

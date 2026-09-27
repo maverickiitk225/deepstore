@@ -1,12 +1,18 @@
 # cmd
 
-`cmd/deepstore` is the process you run and kill by hand. Add it only after WAL replay tests pass (see [docs/phase1-engine.md](../docs/phase1-engine.md)).
+`cmd/deepstore` is the process you run.
 
-Target shape, not an implementation:
+```
+deepstore serve -data-dir DIR [-listen ADDR]
+deepstore put [-addr URL] KEY VALUE
+deepstore get [-addr URL] KEY
+deepstore delete [-addr URL] KEY
+```
 
-- One binary: `go run ./cmd/deepstore`
-- Flag for a data directory (where `wal.log` lives)
-- Enough surface to Put / Get / Delete — a tiny CLI or a few HTTP routes
-- After an acked Put, `kill -9` the process, start it again on the same dir, Get must see the value
+`serve` keeps the HTTP API up until SIGINT or SIGTERM, then stops accepting, finishes in-flight requests, and closes the WAL. `put`, `get`, and `delete` talk to that server. The default address is `http://127.0.0.1:7000`.
 
-No gRPC, no cluster flags, no Raft in this binary yet.
+Routes:
+
+- `PUT /v1/keys/{key}` with `{"value":"..."}` returns `{"index":N}`
+- `GET /v1/keys/{key}` returns `{"value":"..."}`, or 404
+- `DELETE /v1/keys/{key}` returns `{"index":N}`

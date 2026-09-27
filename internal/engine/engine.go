@@ -38,45 +38,45 @@ func Open(dir string) (*Engine, error) {
 	}, nil
 }
 
-func (e *Engine) Put(key, value string) error {
+func (e *Engine) Put(key, value string) (uint64, error) {
 	if key == "" {
-		return fmt.Errorf("engine: empty key")
+		return 0, fmt.Errorf("engine: empty key")
 	}
 	return e.commit(wal.Record{OpType: wal.OpTypePut, Key: key, Value: value})
 }
 
-func (e *Engine) Delete(key string) error {
+func (e *Engine) Delete(key string) (uint64, error) {
 	if key == "" {
-		return fmt.Errorf("engine: empty key")
+		return 0, fmt.Errorf("engine: empty key")
 	}
 	return e.commit(wal.Record{OpType: wal.OpTypeDelete, Key: key})
 }
 
-func (e *Engine) commit(rec wal.Record) error {
+func (e *Engine) commit(rec wal.Record) (uint64, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if err := e.errIfNotWritable(); err != nil {
-		return err
+		return 0, err
 	}
 
 	rec.Index = e.lastIndex + 1
 	if err := e.wal.Append(rec); err != nil {
-		return err
+		return 0, err
 	}
 	if err := e.wal.Sync(); err != nil {
 		e.poisoned = err
-		return err
+		return 0, err
 	}
 	cmd, err := recordToCommand(rec)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if err := e.sm.Apply(cmd); err != nil {
-		return err
+		return 0, err
 	}
 	e.lastIndex = rec.Index
 	e.appliedIndex = rec.Index
-	return nil
+	return rec.Index, nil
 }
 
 func (e *Engine) LastIndex() uint64 {
