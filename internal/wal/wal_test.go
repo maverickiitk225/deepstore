@@ -137,31 +137,121 @@ func TestWALTornTailTruncates(t *testing.T) {
 	}
 }
 
-func TestWALCorruptMiddleFails(t *testing.T) {
+func TestWALBadCRCOnFinalRecordTruncates(t *testing.T) {
+	for _, extra := range [][]byte{nil, {0, 0, 0, 0}} {
+		t.Run(fmt.Sprintf("extra_%d", len(extra)), func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, walFileName)
+
+			w, err := Open(dir, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := w.Append(Record{OpType: OpTypePut, Key: "ok", Value: "1"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := w.Sync(); err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			firstSize := info.Size()
+			if err := w.Append(Record{OpType: OpTypePut, Key: "tail", Value: "2"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := w.Sync(); err != nil {
+				t.Fatal(err)
+			}
+			if err := w.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data[len(data)-1] ^= 0xff
+			data = append(data, extra...)
+			if err := os.WriteFile(path, data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			var got []Record
+			w, err = Open(dir, func(r Record) error {
+				got = append(got, r)
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer w.Close()
+
+			if len(got) != 1 || got[0].Key != "ok" || got[0].Value != "1" {
+				t.Fatalf("after bad crc tail: got %+v, want one put ok", got)
+			}
+			info, err = os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Size() != firstSize {
+				t.Fatalf("wal size = %d, want %d", info.Size(), firstSize)
+			}
+		})
+	}
+}
+
+func TestWALBadCRCFollowedByValidRecordFails(t *testing.T) {
 	dir := t.TempDir()
+	path := filepath.Join(dir, walFileName)
 
 	w, err := Open(dir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = w.Append(Record{OpType: OpTypePut, Key: "a", Value: "1"})
-	_ = w.Append(Record{OpType: OpTypePut, Key: "b", Value: "2"})
-	_ = w.Sync()
-	_ = w.Close()
+	if err := w.Append(Record{OpType: OpTypePut, Key: "a", Value: "1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstSize := info.Size()
+	if err := w.Append(Record{OpType: OpTypePut, Key: "b", Value: "2"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
 
-	path := filepath.Join(dir, walFileName)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	data[len(data)/2] ^= 0xff
+	data[firstSize-1] ^= 0xff
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	before := int64(len(data))
 
-	_, err = Open(dir, func(r Record) error { return nil })
+	_, err = Open(dir, func(Record) error { return nil })
 	if err == nil {
-		t.Fatal("Open corrupt wal: err = nil, want error")
+		t.Fatal("Open crc mismatch with a later valid record: err = nil, want error")
+	}
+
+	info, err = os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != before {
+		t.Fatalf("wal size = %d, want %d", info.Size(), before)
 	}
 }
 

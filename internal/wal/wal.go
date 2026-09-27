@@ -2,6 +2,7 @@ package wal
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -142,6 +143,18 @@ func (w *WAL) recover(apply func(Record) error) (int64, error) {
 
 		var rec Record
 		if err := rec.Decode(frame); err != nil {
+			if errors.Is(err, errCRCMismatch) {
+				follows, ferr := w.validRecordFollows(offset + int64(len(frame)))
+				if ferr != nil {
+					return lastGood, ferr
+				}
+				if !follows {
+					if err := w.truncate(lastGood); err != nil {
+						return lastGood, err
+					}
+					break
+				}
+			}
 			return lastGood, fmt.Errorf("wal: corrupt record at offset %d: %w", offset, err)
 		}
 
@@ -161,6 +174,57 @@ func (w *WAL) recover(apply func(Record) error) (int64, error) {
 		return lastGood, fmt.Errorf("wal: seek end: %w", err)
 	}
 	return lastGood, nil
+}
+
+func (w *WAL) validRecordFollows(start int64) (bool, error) {
+	end, err := w.f.Seek(0, io.SeekEnd)
+	if err != nil {
+		return false, fmt.Errorf("wal: seek: %w", err)
+	}
+
+	offset := start
+	for offset < end {
+		if _, err := w.f.Seek(offset, io.SeekStart); err != nil {
+			return false, fmt.Errorf("wal: seek: %w", err)
+		}
+
+		header := make([]byte, 8)
+		_, err := io.ReadFull(w.f, header)
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			return false, nil
+		}
+		if err != nil {
+			return false, fmt.Errorf("wal: read header: %w", err)
+		}
+
+		payloadLen := binary.LittleEndian.Uint32(header[4:8])
+		if payloadLen > maxPayloadSize {
+			return false, fmt.Errorf("wal: corrupt record at offset %d: payload length %d exceeds max %d", offset, payloadLen, maxPayloadSize)
+		}
+		payload := make([]byte, payloadLen)
+		_, err = io.ReadFull(w.f, payload)
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			return false, nil
+		}
+		if err != nil {
+			return false, fmt.Errorf("wal: read payload: %w", err)
+		}
+
+		frame := make([]byte, 8+len(payload))
+		copy(frame[:8], header)
+		copy(frame[8:], payload)
+
+		var rec Record
+		if err := rec.Decode(frame); err != nil {
+			if errors.Is(err, errCRCMismatch) {
+				offset += int64(len(frame))
+				continue
+			}
+			return false, fmt.Errorf("wal: corrupt record at offset %d: %w", offset, err)
+		}
+		return true, nil
+	}
+	return false, nil
 }
 
 func (w *WAL) truncate(size int64) error {

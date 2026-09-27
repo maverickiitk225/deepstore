@@ -2,9 +2,12 @@ package wal
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
 )
+
+var errCRCMismatch = errors.New("wal: crc mismatch")
 
 type OpType string
 
@@ -18,8 +21,6 @@ const (
 	opDelete byte = 2
 )
 
-// maxPayloadSize is the largest payload recover will allocate.
-// A header length above this is corruption, not a torn tail.
 const maxPayloadSize uint32 = 16 << 20
 
 type Record struct {
@@ -96,7 +97,7 @@ func (r *Record) Decode(data []byte) error {
 	lengthBuf := make([]byte, 4)
 	binary.LittleEndian.PutUint32(lengthBuf, payloadLen)
 	if crc32.ChecksumIEEE(append(lengthBuf, payload...)) != storedCRC {
-		return fmt.Errorf("wal: crc mismatch")
+		return errCRCMismatch
 	}
 
 	if len(payload) < 1+4+4 {

@@ -18,12 +18,6 @@ Raft papers assume these already exist. If they do not, you end up debugging fiv
 | High write throughput despite `fsync` | One `fsync` per Put | Group commit |
 | A way to know you are correct | Unit tests | Linearizability checker (Porcupine) |
 
-## 0. Phase 1 leftovers (do first)
-
-Small things worth fixing before building on top:
-
-- **Torn tail that looks complete.** Some filesystems extend the file (zeros / garbage) before data lands. The last record can then have a full length but a bad CRC. Decide the rule: bad CRC on the *final* record = torn tail (truncate); bad CRC followed by valid records = corruption (refuse). etcd and Postgres make this distinction.
-
 ## 1. Long-running server
 
 The CLI currently opens the WAL, does one op, exits. A Raft node is a process that stays up.
@@ -116,14 +110,13 @@ test/linearizable  Load generator + history recorder + Porcupine check + crash i
 
 ## Suggested order
 
-1. Phase 1 leftovers.
-2. Log index + format version. Replay tests for gaps/repeats.
-3. Server + client subcommands.
-4. Linearizability harness against the server (no crashes yet). Get it green early; it guards every later step.
-5. Add crash injection to the harness.
-6. Group commit. Harness must stay green; benchmark shows the win.
-7. Client sessions + CAS. Harness with retries must stay green.
-8. Segmented WAL, then snapshots, then compaction. Test recovery from: WAL only, snapshot only, snapshot + tail, corrupt newest snapshot.
+1. Log index + format version. Replay tests for gaps/repeats.
+2. Server + client subcommands.
+3. Linearizability harness against the server (no crashes yet). Get it green early; it guards every later step.
+4. Add crash injection to the harness.
+5. Group commit. Harness must stay green; benchmark shows the win.
+6. Client sessions + CAS. Harness with retries must stay green.
+7. Segmented WAL, then snapshots, then compaction. Test recovery from: WAL only, snapshot only, snapshot + tail, corrupt newest snapshot.
 
 ## Tests to write
 

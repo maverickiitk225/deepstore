@@ -53,8 +53,8 @@ On open:
 1. Create or open `wal.log` in the data dir.
 2. Read records from offset 0.
 3. Valid CRC + length: apply to the empty map (Put or Delete).
-4. Short read at EOF: torn tail. Truncate back to the last good offset. Stop.
-5. Bad CRC in the middle of the file: refuse to start. Do not skip. Corruption is not a torn tail.
+4. Short read at EOF, or a CRC mismatch with no valid record after it: torn tail. Truncate back to the last good offset. Stop. A full length with a bad CRC is still a torn tail when the file was extended before the payload landed.
+5. Bad CRC followed by a valid record: refuse to start. Do not skip. Corruption is not a torn tail.
 6. Seek to the last good offset and append from there.
 
 Replay is the only writer of the map at startup. Live Puts after open take the same path: frame → write → Sync → apply → ack.

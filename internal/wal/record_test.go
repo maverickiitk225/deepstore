@@ -2,6 +2,7 @@ package wal
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -68,8 +69,8 @@ func TestDecodeCRCMismatch(t *testing.T) {
 	frame[len(frame)-1] ^= 0xff
 
 	var out Record
-	if err := out.Decode(frame); err == nil {
-		t.Fatal("Decode corrupt frame: err = nil, want error")
+	if err := out.Decode(frame); !errors.Is(err, errCRCMismatch) {
+		t.Fatalf("Decode corrupt frame: err = %v, want crc mismatch", err)
 	}
 }
 
