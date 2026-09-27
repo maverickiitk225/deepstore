@@ -62,23 +62,6 @@ func TestApplyDeleteMissingKey(t *testing.T) {
 	}
 }
 
-func TestApplyClear(t *testing.T) {
-	sm := NewStateMachine()
-	for _, kv := range []struct{ k, v string }{{"a", "1"}, {"b", "2"}} {
-		if err := sm.Apply(Command{Type: CommandTypePut, Key: kv.k, Value: kv.v}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := sm.Apply(Command{Type: CommandTypeClear}); err != nil {
-		t.Fatal(err)
-	}
-	for _, key := range []string{"a", "b"} {
-		if _, ok := sm.Get(key); ok {
-			t.Fatalf("Get(%q) after clear: ok = true, want false", key)
-		}
-	}
-}
-
 func TestApplyInvalidCommand(t *testing.T) {
 	sm := NewStateMachine()
 	err := sm.Apply(Command{Type: CommandType("nope"), Key: "k"})

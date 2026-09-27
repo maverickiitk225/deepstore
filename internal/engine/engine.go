@@ -9,9 +9,10 @@ import (
 )
 
 type Engine struct {
-	wal *wal.WAL
-	sm  *store.StateMachine
-	mu  sync.Mutex
+	wal    *wal.WAL
+	sm     *store.StateMachine
+	mu     sync.Mutex
+	closed bool
 }
 
 func Open(dir string) (*Engine, error) {
@@ -36,6 +37,9 @@ func (e *Engine) Put(key, value string) error {
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.closed {
+		return fmt.Errorf("engine: closed")
+	}
 
 	rec := wal.Record{OpType: wal.OpTypePut, Key: key, Value: value}
 	if err := e.wal.Append(rec); err != nil {
@@ -58,6 +62,9 @@ func (e *Engine) Delete(key string) error {
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.closed {
+		return fmt.Errorf("engine: closed")
+	}
 
 	rec := wal.Record{OpType: wal.OpTypeDelete, Key: key}
 	if err := e.wal.Append(rec); err != nil {
@@ -78,10 +85,19 @@ func (e *Engine) Get(key string) (string, bool) {
 }
 
 func (e *Engine) Close() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.closed {
+		return nil
+	}
+	e.closed = true
 	if e.wal == nil {
 		return nil
 	}
-	return e.wal.Close()
+	err := e.wal.Close()
+	e.wal = nil
+	return err
 }
 
 func recordToCommand(r wal.Record) (store.Command, error) {

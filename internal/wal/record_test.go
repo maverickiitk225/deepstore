@@ -45,10 +45,10 @@ func TestEncodeEmptyKey(t *testing.T) {
 	}
 }
 
-func TestEncodeClearNotSupported(t *testing.T) {
-	_, err := Record{OpType: OpTypeClear, Key: "k"}.Encode()
+func TestEncodeUnknownOp(t *testing.T) {
+	_, err := Record{OpType: OpType("clear"), Key: "k"}.Encode()
 	if err == nil {
-		t.Fatal("Encode clear: err = nil, want error")
+		t.Fatal("Encode unknown op: err = nil, want error")
 	}
 }
 

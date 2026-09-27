@@ -9,9 +9,7 @@ type CommandType string
 
 const (
 	CommandTypePut    CommandType = "put"
-	CommandTypeGet    CommandType = "get"
 	CommandTypeDelete CommandType = "delete"
-	CommandTypeClear  CommandType = "clear"
 )
 
 type Command struct {
@@ -40,8 +38,6 @@ func (s *StateMachine) Apply(cmd Command) error {
 		s.data[cmd.Key] = cmd.Value
 	case CommandTypeDelete:
 		delete(s.data, cmd.Key)
-	case CommandTypeClear:
-		s.data = make(map[string]string)
 	default:
 		return fmt.Errorf("invalid command type: %s", cmd.Type)
 	}

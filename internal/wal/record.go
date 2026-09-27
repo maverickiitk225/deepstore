@@ -11,7 +11,6 @@ type OpType string
 const (
 	OpTypePut    OpType = "put"
 	OpTypeDelete OpType = "delete"
-	OpTypeClear  OpType = "clear"
 )
 
 const (

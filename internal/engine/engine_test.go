@@ -1,8 +1,10 @@
 package engine
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -138,5 +140,59 @@ func TestEngineConcurrentPutSameKey(t *testing.T) {
 	got, ok := e.Get("hot")
 	if !ok || got == "" {
 		t.Fatalf("Get(hot) = (%q, %v), want non-empty value", got, ok)
+	}
+}
+
+func TestEngineCloseWaitsForInFlightPuts(t *testing.T) {
+	dir := t.TempDir()
+
+	e, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const n = 64
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = e.Put(fmt.Sprintf("k%d", i), "v")
+		}(i)
+	}
+	if err := e.Close(); err != nil {
+		t.Fatal(err)
+	}
+	wg.Wait()
+
+	if err := e.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Put("after", "x"); err == nil {
+		t.Fatal("Put after Close: err = nil, want error")
+	}
+	if err := e.Delete("after"); err == nil {
+		t.Fatal("Delete after Close: err = nil, want error")
+	}
+
+	e, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+
+	for i, putErr := range errs {
+		key := fmt.Sprintf("k%d", i)
+		_, ok := e.Get(key)
+		if putErr == nil && !ok {
+			t.Fatalf("Put(%s) returned nil but key missing after reopen", key)
+		}
+		if putErr != nil && ok {
+			t.Fatalf("Put(%s) returned %v but key is present after reopen", key, putErr)
+		}
+	}
+	if _, ok := e.Get("after"); ok {
+		t.Fatal("Put after Close was persisted")
 	}
 }
