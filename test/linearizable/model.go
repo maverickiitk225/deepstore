@@ -19,21 +19,37 @@ type kvState struct {
 	Present bool
 }
 
+// kvOutput is what a call returned. Unknown means a put was in flight when
+// the process was killed, so the write may or may not have been synced.
+type kvOutput struct {
+	Value   string
+	Present bool
+	Unknown bool
+}
+
 func kvModel() porcupine.Model {
-	return porcupine.Model{
-		Init: func() any {
-			return kvState{}
+	nm := porcupine.NondeterministicModel{
+		Init: func() []any {
+			return []any{kvState{}}
 		},
-		Step: func(state, input, output any) (bool, any) {
+		Step: func(state, input, output any) []any {
 			st := state.(kvState)
 			in := input.(kvInput)
+			out := output.(kvOutput)
 			switch in.Op {
 			case "put":
-				return true, kvState{Value: in.Value, Present: true}
+				written := kvState{Value: in.Value, Present: true}
+				if out.Unknown {
+					return []any{st, written}
+				}
+				return []any{written}
 			case "get":
-				return output.(kvState) == st, st
+				if out.Value == st.Value && out.Present == st.Present {
+					return []any{st}
+				}
+				return nil
 			default:
-				return false, st
+				return nil
 			}
 		},
 		Equal: func(a, b any) bool {
@@ -41,10 +57,13 @@ func kvModel() porcupine.Model {
 		},
 		DescribeOperation: func(input, output any) string {
 			in := input.(kvInput)
+			out := output.(kvOutput)
 			if in.Op == "put" {
+				if out.Unknown {
+					return fmt.Sprintf("put(%q, %q) -> unknown", in.Key, in.Value)
+				}
 				return fmt.Sprintf("put(%q, %q)", in.Key, in.Value)
 			}
-			out := output.(kvState)
 			if !out.Present {
 				return fmt.Sprintf("get(%q) -> missing", in.Key)
 			}
@@ -59,6 +78,7 @@ func kvModel() porcupine.Model {
 		},
 		Partition: partitionByKey,
 	}
+	return nm.ToModel()
 }
 
 func partitionByKey(history []porcupine.Operation) [][]porcupine.Operation {

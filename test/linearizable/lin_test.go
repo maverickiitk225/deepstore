@@ -24,14 +24,14 @@ func TestModelAcceptsPutThenGet(t *testing.T) {
 			ClientId: 0,
 			Input:    kvInput{Op: "put", Key: "k", Value: "v"},
 			Call:     0,
-			Output:   kvState{},
+			Output:   kvOutput{},
 			Return:   10,
 		},
 		{
 			ClientId: 1,
 			Input:    kvInput{Op: "get", Key: "k"},
 			Call:     20,
-			Output:   kvState{Value: "v", Present: true},
+			Output:   kvOutput{Value: "v", Present: true},
 			Return:   30,
 		},
 	}
@@ -46,14 +46,14 @@ func TestModelRejectsGetMissingAfterPut(t *testing.T) {
 			ClientId: 0,
 			Input:    kvInput{Op: "put", Key: "k", Value: "v"},
 			Call:     0,
-			Output:   kvState{},
+			Output:   kvOutput{},
 			Return:   10,
 		},
 		{
 			ClientId: 1,
 			Input:    kvInput{Op: "get", Key: "k"},
 			Call:     20,
-			Output:   kvState{},
+			Output:   kvOutput{},
 			Return:   30,
 		},
 	}
@@ -121,7 +121,7 @@ func TestServerPutGetLinearizable(t *testing.T) {
 						ClientId: id,
 						Input:    kvInput{Op: "put", Key: key, Value: value},
 						Call:     call,
-						Output:   kvState{},
+						Output:   kvOutput{},
 						Return:   ret,
 					})
 					continue
@@ -137,7 +137,7 @@ func TestServerPutGetLinearizable(t *testing.T) {
 					ClientId: id,
 					Input:    kvInput{Op: "get", Key: key},
 					Call:     call,
-					Output:   kvState{Value: value, Present: ok},
+					Output:   kvOutput{Value: value, Present: ok},
 					Return:   ret,
 				})
 			}
