@@ -35,13 +35,13 @@ Reject empty keys. Copy value bytes out of the read buffer so later reads cannot
 
 ## fsync policy
 
-Phase 1: **`Sync()` every record before ack.** One `write` of the full framed record, then `file.Sync()`.
+Phase 1 synced every record before ack. The engine now group-commits: one writer takes the records already queued, one `write` of that batch, one `file.Sync()`, then apply and ack.
 
 | Policy | Meaning |
 | --- | --- |
-| Acked | `write` + `Sync` both returned nil, then the map was updated, then the client got OK |
+| Acked | The `Sync` covering that record returned nil, then the map was updated, then the client got OK |
 | In OS cache only | Invisible after crash. Must not ack |
-| Group commit (later) | Batch several records, one `Sync`. Same rule: no ack until that `Sync` returns |
+| Group commit | Several records share one `Sync`. Same rule: no ack until that `Sync` returns |
 
 `write` success is not durability. `Sync` is. If `Sync` fails, do not apply, do not ack, treat the process as unsafe until you inspect the file.
 

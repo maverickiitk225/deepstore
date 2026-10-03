@@ -52,6 +52,50 @@ func TestWALAppendReplay(t *testing.T) {
 	}
 }
 
+func TestWALAppendManyOneWrite(t *testing.T) {
+	dir := t.TempDir()
+
+	w, err := Open(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recs := []Record{
+		{Index: 1, OpType: OpTypePut, Key: "a", Value: "1"},
+		{Index: 2, OpType: OpTypeDelete, Key: "a"},
+		{Index: 3, OpType: OpTypePut, Key: "b", Value: "3"},
+	}
+	if err := w.AppendMany(recs); err != nil {
+		t.Fatal(err)
+	}
+	if w.LastIndex() != 3 {
+		t.Fatalf("LastIndex = %d, want 3", w.LastIndex())
+	}
+	if err := w.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var got []Record
+	w, err = Open(dir, func(r Record) error {
+		got = append(got, r)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	if len(got) != len(recs) {
+		t.Fatalf("replay count = %d, want %d", len(got), len(recs))
+	}
+	for i := range recs {
+		if got[i].Index != recs[i].Index || got[i].OpType != recs[i].OpType || got[i].Key != recs[i].Key || got[i].Value != recs[i].Value {
+			t.Fatalf("record %d: got %+v, want %+v", i, got[i], recs[i])
+		}
+	}
+}
+
 func TestWALReplayAppliesToStateMachine(t *testing.T) {
 	dir := t.TempDir()
 

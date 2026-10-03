@@ -54,24 +54,41 @@ func (w *WAL) LastIndex() uint64 {
 }
 
 func (w *WAL) Append(r Record) error {
-	if r.Index != w.lastIndex+1 {
-		return fmt.Errorf("wal: index %d, want %d", r.Index, w.lastIndex+1)
+	return w.AppendMany([]Record{r})
+}
+
+func (w *WAL) AppendMany(recs []Record) error {
+	if len(recs) == 0 {
+		return nil
 	}
-	frame, err := r.Encode()
-	if err != nil {
-		return err
+	buf := make([]byte, 0, 64*len(recs))
+	for i := range recs {
+		want := w.lastIndex + uint64(i) + 1
+		if recs[i].Index != want {
+			return fmt.Errorf("wal: index %d, want %d", recs[i].Index, want)
+		}
+		frame, err := recs[i].Encode()
+		if err != nil {
+			return err
+		}
+		buf = append(buf, frame...)
 	}
-	n, err := w.f.Write(frame)
+	n, err := w.f.Write(buf)
+	if n != len(buf) {
+		if err != nil {
+			return fmt.Errorf("wal: write: %w", err)
+		}
+		return fmt.Errorf("wal: short write: wrote %d of %d bytes", n, len(buf))
+	}
 	if err != nil {
 		return fmt.Errorf("wal: write: %w", err)
 	}
-	if n != len(frame) {
-		return fmt.Errorf("wal: short write: wrote %d of %d bytes", n, len(frame))
-	}
-	w.lastIndex = r.Index
+	w.lastIndex = recs[len(recs)-1].Index
 	return nil
 }
 
+// SetSyncHook installs a test hook that runs before each fsync; a non-nil error skips the fsync.
+// Like AppendMany, it is not safe to call while Sync is running.
 func (w *WAL) SetSyncHook(fn func() error) {
 	w.syncFn = fn
 }
