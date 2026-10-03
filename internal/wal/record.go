@@ -14,11 +14,13 @@ type OpType string
 const (
 	OpTypePut    OpType = "put"
 	OpTypeDelete OpType = "delete"
+	OpTypeCAS    OpType = "cas"
 )
 
 const (
 	opPut    byte = 1
 	opDelete byte = 2
+	opCAS    byte = 3
 )
 
 // formatVersion is the payload version written by Encode.
@@ -29,10 +31,11 @@ const formatVersion byte = 2
 const maxPayloadSize uint32 = 16 << 20
 
 type Record struct {
-	Index  uint64
-	OpType OpType
-	Key    string
-	Value  string
+	Index    uint64
+	OpType   OpType
+	Key      string
+	Value    string
+	Expected string // compared by CAS; ignored for put and delete
 }
 
 func (r Record) Encode() ([]byte, error) {
@@ -48,10 +51,18 @@ func (r Record) Encode() ([]byte, error) {
 		return nil, fmt.Errorf("wal: index must be positive")
 	}
 
+	if r.OpType != OpTypeCAS && r.Expected != "" {
+		return nil, fmt.Errorf("wal: expected set on %s", r.OpType)
+	}
+
 	key := []byte(r.Key)
 	value := []byte(r.Value)
 	if r.OpType == OpTypeDelete {
 		value = nil
+	}
+	var expected []byte
+	if r.OpType == OpTypeCAS {
+		expected = []byte(r.Expected)
 	}
 
 	if len(key) > int(^uint32(0)) {
@@ -60,8 +71,14 @@ func (r Record) Encode() ([]byte, error) {
 	if len(value) > int(^uint32(0)) {
 		return nil, fmt.Errorf("wal: value too long")
 	}
+	if len(expected) > int(^uint32(0)) {
+		return nil, fmt.Errorf("wal: expected too long")
+	}
 
 	payloadLen := 1 + 8 + 1 + 4 + len(key) + 4 + len(value)
+	if r.OpType == OpTypeCAS {
+		payloadLen += 4 + len(expected)
+	}
 	if payloadLen > int(maxPayloadSize) {
 		return nil, fmt.Errorf("wal: payload too long")
 	}
@@ -77,6 +94,12 @@ func (r Record) Encode() ([]byte, error) {
 	binary.LittleEndian.PutUint32(payload[off:], uint32(len(value)))
 	off += 4
 	copy(payload[off:], value)
+	if r.OpType == OpTypeCAS {
+		off += len(value)
+		binary.LittleEndian.PutUint32(payload[off:], uint32(len(expected)))
+		off += 4
+		copy(payload[off:], expected)
+	}
 
 	lengthBuf := make([]byte, 4)
 	binary.LittleEndian.PutUint32(lengthBuf, uint32(len(payload)))
@@ -146,19 +169,35 @@ func (r *Record) Decode(data []byte) error {
 	value := make([]byte, valLen)
 	copy(value, payload[off:off+int(valLen)])
 	off += int(valLen)
-	if off != len(payload) {
-		return fmt.Errorf("wal: trailing payload bytes")
-	}
 
 	opType, err := decodeOp(op)
 	if err != nil {
 		return err
 	}
 
+	var expected []byte
+	if opType == OpTypeCAS {
+		if len(payload)-off < 4 {
+			return fmt.Errorf("wal: missing expected length")
+		}
+		expLen := binary.LittleEndian.Uint32(payload[off:])
+		off += 4
+		if int(expLen) > len(payload)-off {
+			return fmt.Errorf("wal: invalid expected length")
+		}
+		expected = make([]byte, expLen)
+		copy(expected, payload[off:off+int(expLen)])
+		off += int(expLen)
+	}
+	if off != len(payload) {
+		return fmt.Errorf("wal: trailing payload bytes")
+	}
+
 	r.Index = index
 	r.OpType = opType
 	r.Key = string(key)
 	r.Value = string(value)
+	r.Expected = string(expected)
 	return nil
 }
 
@@ -168,6 +207,8 @@ func encodeOp(t OpType) (byte, error) {
 		return opPut, nil
 	case OpTypeDelete:
 		return opDelete, nil
+	case OpTypeCAS:
+		return opCAS, nil
 	default:
 		return 0, fmt.Errorf("wal: op not encodable: %q", t)
 	}
@@ -179,6 +220,8 @@ func decodeOp(op byte) (OpType, error) {
 		return OpTypePut, nil
 	case opDelete:
 		return OpTypeDelete, nil
+	case opCAS:
+		return OpTypeCAS, nil
 	default:
 		return "", fmt.Errorf("wal: unknown op: %d", op)
 	}

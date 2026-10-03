@@ -29,8 +29,9 @@ type commitReq struct {
 }
 
 type commitResp struct {
-	index uint64
-	err   error
+	index   uint64
+	swapped bool
+	err     error
 }
 
 func Open(dir string) (*Engine, error) {
@@ -40,7 +41,8 @@ func Open(dir string) (*Engine, error) {
 		if err != nil {
 			return err
 		}
-		return sm.Apply(cmd)
+		_, err = sm.Apply(cmd)
+		return err
 	})
 	if err != nil {
 		return nil, err
@@ -61,33 +63,45 @@ func (e *Engine) Put(key, value string) (uint64, error) {
 	if key == "" {
 		return 0, fmt.Errorf("engine: empty key")
 	}
-	return e.commit(wal.Record{OpType: wal.OpTypePut, Key: key, Value: value})
+	index, _, err := e.commit(wal.Record{OpType: wal.OpTypePut, Key: key, Value: value})
+	return index, err
 }
 
 func (e *Engine) Delete(key string) (uint64, error) {
 	if key == "" {
 		return 0, fmt.Errorf("engine: empty key")
 	}
-	return e.commit(wal.Record{OpType: wal.OpTypeDelete, Key: key})
+	index, _, err := e.commit(wal.Record{OpType: wal.OpTypeDelete, Key: key})
+	return index, err
 }
 
-func (e *Engine) commit(rec wal.Record) (uint64, error) {
+// CAS swaps key to value when the key is present and its current value equals
+// expected. A missing key does not match. The record is appended either way,
+// so a false result still advances the log index and replays as a no-op.
+func (e *Engine) CAS(key, expected, value string) (uint64, bool, error) {
+	if key == "" {
+		return 0, false, fmt.Errorf("engine: empty key")
+	}
+	return e.commit(wal.Record{OpType: wal.OpTypeCAS, Key: key, Value: value, Expected: expected})
+}
+
+func (e *Engine) commit(rec wal.Record) (uint64, bool, error) {
 	cmd, err := recordToCommand(rec)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	resp := make(chan commitResp, 1)
 	e.mu.Lock()
 	if err := e.errIfNotWritable(); err != nil {
 		e.mu.Unlock()
-		return 0, err
+		return 0, false, err
 	}
 	e.queue = append(e.queue, commitReq{rec: rec, cmd: cmd, resp: resp})
 	e.cond.Signal()
 	e.mu.Unlock()
 
 	r := <-resp
-	return r.index, r.err
+	return r.index, r.swapped, r.err
 }
 
 func (e *Engine) writer() {
@@ -142,21 +156,20 @@ func (e *Engine) commitBatch(batch []commitReq) {
 		return
 	}
 
+	resps := make([]commitResp, len(batch))
 	e.mu.Lock()
 	for i := range batch {
-		if err := e.sm.Apply(batch[i].cmd); err != nil {
+		res, err := e.sm.Apply(batch[i].cmd)
+		if err != nil {
 			panic(fmt.Sprintf("engine: apply durable record %d: %v", batch[i].rec.Index, err))
 		}
+		resps[i] = commitResp{index: batch[i].rec.Index, swapped: res.Swapped}
 		e.lastIndex = batch[i].rec.Index
 		e.appliedIndex = batch[i].rec.Index
 	}
 	e.mu.Unlock()
-	replyApplied(batch)
-}
-
-func replyApplied(batch []commitReq) {
 	for i := range batch {
-		batch[i].resp <- commitResp{index: batch[i].rec.Index}
+		batch[i].resp <- resps[i]
 	}
 }
 
@@ -222,12 +235,14 @@ func (e *Engine) Close() error {
 }
 
 func recordToCommand(r wal.Record) (store.Command, error) {
-	cmd := store.Command{Key: r.Key, Value: r.Value}
+	cmd := store.Command{Key: r.Key, Value: r.Value, Expected: r.Expected}
 	switch r.OpType {
 	case wal.OpTypePut:
 		cmd.Type = store.CommandTypePut
 	case wal.OpTypeDelete:
 		cmd.Type = store.CommandTypeDelete
+	case wal.OpTypeCAS:
+		cmd.Type = store.CommandTypeCAS
 	default:
 		return store.Command{}, fmt.Errorf("engine: unsupported wal op: %q", r.OpType)
 	}

@@ -24,6 +24,7 @@ func New(eng *engine.Engine, addr string) *Server {
 	mux.HandleFunc("PUT /v1/keys/{key}", s.put)
 	mux.HandleFunc("GET /v1/keys/{key}", s.get)
 	mux.HandleFunc("DELETE /v1/keys/{key}", s.delete)
+	mux.HandleFunc("POST /v1/keys/{key}/cas", s.cas)
 	s.http = &http.Server{
 		Addr:              addr,
 		Handler:           mux,
@@ -76,6 +77,27 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, struct {
 		Value string `json:"value"`
 	}{Value: value})
+}
+
+func (s *Server) cas(w http.ResponseWriter, r *http.Request) {
+	key := r.PathValue("key")
+	var body struct {
+		Expected string `json:"expected"`
+		Value    string `json:"value"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	index, swapped, err := s.eng.CAS(key, body.Expected, body.Value)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Index   uint64 `json:"index"`
+		Swapped bool   `json:"swapped"`
+	}{Index: index, Swapped: swapped})
 }
 
 func (s *Server) delete(w http.ResponseWriter, r *http.Request) {

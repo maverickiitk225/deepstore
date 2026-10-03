@@ -41,6 +41,53 @@ func TestEncodeDecodeDelete(t *testing.T) {
 	}
 }
 
+func TestEncodeDecodeCAS(t *testing.T) {
+	in := Record{Index: 4, OpType: OpTypeCAS, Key: "k", Value: "new", Expected: "old"}
+	frame, err := in.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out Record
+	if err := out.Decode(frame); err != nil {
+		t.Fatal(err)
+	}
+	if out != in {
+		t.Fatalf("round-trip: got %+v, want %+v", out, in)
+	}
+
+	const expOff = 1 + 8 + 1 + 4 + 1 + 4 + len("new") + 4
+	if frame[8+expOff] != 'o' {
+		t.Fatalf("expected byte = %q, want 'o'", frame[8+expOff])
+	}
+	frame[8+expOff] = 'X'
+	if out.Expected != "old" {
+		t.Fatal("Decode aliased expected bytes")
+	}
+}
+
+func TestEncodeDecodeCASEmptyExpected(t *testing.T) {
+	in := Record{Index: 1, OpType: OpTypeCAS, Key: "k", Value: "", Expected: ""}
+	frame, err := in.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out Record
+	if err := out.Decode(frame); err != nil {
+		t.Fatal(err)
+	}
+	if out != in {
+		t.Fatalf("round-trip: got %+v, want %+v", out, in)
+	}
+}
+
+func TestEncodeExpectedOnPut(t *testing.T) {
+	_, err := Record{Index: 1, OpType: OpTypePut, Key: "k", Value: "v", Expected: "x"}.Encode()
+	if err == nil {
+		t.Fatal("Encode put with expected: err = nil, want error")
+	}
+}
+
 func TestEncodeEmptyKey(t *testing.T) {
 	_, err := Record{OpType: OpTypePut, Key: "", Value: "v"}.Encode()
 	if err == nil {

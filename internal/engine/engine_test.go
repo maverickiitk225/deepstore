@@ -67,6 +67,160 @@ func TestEngineDeleteReopen(t *testing.T) {
 	}
 }
 
+func TestEngineCAS(t *testing.T) {
+	dir := t.TempDir()
+
+	e, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, err := e.Put("k", "old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if index != 1 {
+		t.Fatalf("Put index = %d, want 1", index)
+	}
+
+	index, swapped, err := e.CAS("k", "stale", "nope")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if index != 2 || swapped {
+		t.Fatalf("CAS mismatch = (%d, %v), want (2, false)", index, swapped)
+	}
+	if got, ok := e.Get("k"); !ok || got != "old" {
+		t.Fatalf("Get after mismatch = (%q, %v), want (old, true)", got, ok)
+	}
+
+	index, swapped, err = e.CAS("k", "old", "new")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if index != 3 || !swapped {
+		t.Fatalf("CAS match = (%d, %v), want (3, true)", index, swapped)
+	}
+
+	index, swapped, err = e.CAS("missing", "", "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if index != 4 || swapped {
+		t.Fatalf("CAS missing = (%d, %v), want (4, false)", index, swapped)
+	}
+	if _, ok := e.Get("missing"); ok {
+		t.Fatal("Get(missing) after CAS: ok = true, want false")
+	}
+	if _, _, err := e.CAS("", "a", "b"); err == nil {
+		t.Fatal("CAS empty key: err = nil, want error")
+	}
+
+	if err := e.Close(); err != nil {
+		t.Fatal(err)
+	}
+	e, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	if got, ok := e.Get("k"); !ok || got != "new" {
+		t.Fatalf("Get after reopen = (%q, %v), want (new, true)", got, ok)
+	}
+	if e.LastIndex() != 4 || e.AppliedIndex() != 4 {
+		t.Fatalf("indexes after reopen = (%d, %d), want (4, 4)", e.LastIndex(), e.AppliedIndex())
+	}
+}
+
+func TestEngineCASSeesEarlierRecordInBatch(t *testing.T) {
+	e, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+
+	e.mu.Lock()
+	e.holdBatch = true
+	e.mu.Unlock()
+
+	putDone := make(chan struct{})
+	var putIndex uint64
+	var putErr error
+	go func() {
+		defer close(putDone)
+		putIndex, putErr = e.Put("k", "old")
+	}()
+	waitQueued(t, e, 1)
+
+	casDone := make(chan struct{})
+	var casIndex uint64
+	var swapped bool
+	var casErr error
+	go func() {
+		defer close(casDone)
+		casIndex, swapped, casErr = e.CAS("k", "old", "new")
+	}()
+	waitQueued(t, e, 2)
+
+	e.mu.Lock()
+	e.holdBatch = false
+	e.cond.Broadcast()
+	e.mu.Unlock()
+	<-putDone
+	<-casDone
+
+	if putErr != nil || casErr != nil {
+		t.Fatalf("put err %v, cas err %v", putErr, casErr)
+	}
+	if putIndex != 1 || casIndex != 2 || !swapped {
+		t.Fatalf("put index %d, cas (%d, %v), want 1 and (2, true)", putIndex, casIndex, swapped)
+	}
+	if got, ok := e.Get("k"); !ok || got != "new" {
+		t.Fatalf("Get(k) = (%q, %v), want (new, true)", got, ok)
+	}
+}
+
+func TestEngineCASOneWinner(t *testing.T) {
+	e, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	if _, err := e.Put("k", "old"); err != nil {
+		t.Fatal(err)
+	}
+
+	const n = 32
+	var wg sync.WaitGroup
+	wg.Add(n)
+	wins := make([]bool, n)
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			_, wins[i], errs[i] = e.CAS("k", "old", fmt.Sprintf("w%d", i))
+		}(i)
+	}
+	wg.Wait()
+
+	won := 0
+	var winner string
+	for i := range errs {
+		if errs[i] != nil {
+			t.Fatalf("CAS %d: %v", i, errs[i])
+		}
+		if wins[i] {
+			won++
+			winner = fmt.Sprintf("w%d", i)
+		}
+	}
+	if won != 1 {
+		t.Fatalf("winners = %d, want 1", won)
+	}
+	if got, ok := e.Get("k"); !ok || got != winner {
+		t.Fatalf("Get(k) = (%q, %v), want (%q, true)", got, ok, winner)
+	}
+}
+
 func TestEngineEmptyKey(t *testing.T) {
 	e, err := Open(t.TempDir())
 	if err != nil {
@@ -576,7 +730,7 @@ func TestEngineRejectsInvalidOpBeforeWAL(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := e.commit(wal.Record{OpType: "bogus", Key: "k"}); err == nil {
+	if _, _, err := e.commit(wal.Record{OpType: "bogus", Key: "k"}); err == nil {
 		t.Fatal("commit(bogus): err = nil, want error")
 	}
 

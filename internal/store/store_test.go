@@ -19,7 +19,7 @@ func TestApplySetAndGet(t *testing.T) {
 	sm := NewStateMachine()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := sm.Apply(Command{Type: CommandTypePut, Key: tt.key, Value: tt.value}); err != nil {
+			if _, err := sm.Apply(Command{Type: CommandTypePut, Key: tt.key, Value: tt.value}); err != nil {
 				t.Fatalf("Apply set: %v", err)
 			}
 			got, ok := sm.Get(tt.key)
@@ -43,10 +43,10 @@ func TestGetMissingKey(t *testing.T) {
 
 func TestApplyDelete(t *testing.T) {
 	sm := NewStateMachine()
-	if err := sm.Apply(Command{Type: CommandTypePut, Key: "a", Value: "1"}); err != nil {
+	if _, err := sm.Apply(Command{Type: CommandTypePut, Key: "a", Value: "1"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := sm.Apply(Command{Type: CommandTypeDelete, Key: "a"}); err != nil {
+	if _, err := sm.Apply(Command{Type: CommandTypeDelete, Key: "a"}); err != nil {
 		t.Fatal(err)
 	}
 	_, ok := sm.Get("a")
@@ -57,14 +57,14 @@ func TestApplyDelete(t *testing.T) {
 
 func TestApplyDeleteMissingKey(t *testing.T) {
 	sm := NewStateMachine()
-	if err := sm.Apply(Command{Type: CommandTypeDelete, Key: "ghost"}); err != nil {
+	if _, err := sm.Apply(Command{Type: CommandTypeDelete, Key: "ghost"}); err != nil {
 		t.Fatalf("delete missing key: %v", err)
 	}
 }
 
 func TestApplyInvalidCommand(t *testing.T) {
 	sm := NewStateMachine()
-	err := sm.Apply(Command{Type: CommandType("nope"), Key: "k"})
+	_, err := sm.Apply(Command{Type: CommandType("nope"), Key: "k"})
 	if err == nil {
 		t.Fatal("Apply invalid type: err = nil, want error")
 	}
@@ -83,7 +83,7 @@ func TestConcurrentSetSameKey(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < iterations; i++ {
 				val := string(rune('a' + (g+i)%26))
-				_ = sm.Apply(Command{Type: CommandTypePut, Key: "hot", Value: val})
+				_, _ = sm.Apply(Command{Type: CommandTypePut, Key: "hot", Value: val})
 			}
 		}()
 	}
@@ -98,9 +98,63 @@ func TestConcurrentSetSameKey(t *testing.T) {
 	}
 }
 
+func TestApplyCAS(t *testing.T) {
+	sm := NewStateMachine()
+	if _, err := sm.Apply(Command{Type: CommandTypePut, Key: "k", Value: "old"}); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := sm.Apply(Command{Type: CommandTypeCAS, Key: "k", Expected: "stale", Value: "new"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Swapped {
+		t.Fatal("CAS stale expected: swapped = true, want false")
+	}
+	if got, ok := sm.Get("k"); !ok || got != "old" {
+		t.Fatalf("Get after mismatch = (%q, %v), want (old, true)", got, ok)
+	}
+
+	res, err = sm.Apply(Command{Type: CommandTypeCAS, Key: "k", Expected: "old", Value: "new"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Swapped {
+		t.Fatal("CAS matching expected: swapped = false, want true")
+	}
+	if got, ok := sm.Get("k"); !ok || got != "new" {
+		t.Fatalf("Get after swap = (%q, %v), want (new, true)", got, ok)
+	}
+
+	res, err = sm.Apply(Command{Type: CommandTypeCAS, Key: "missing", Expected: "", Value: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Swapped {
+		t.Fatal("CAS missing key: swapped = true, want false")
+	}
+	if _, ok := sm.Get("missing"); ok {
+		t.Fatal("Get missing after CAS: ok = true, want false")
+	}
+
+	if _, err := sm.Apply(Command{Type: CommandTypePut, Key: "empty", Value: ""}); err != nil {
+		t.Fatal(err)
+	}
+	res, err = sm.Apply(Command{Type: CommandTypeCAS, Key: "empty", Expected: "", Value: "set"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Swapped {
+		t.Fatal("CAS empty value: swapped = false, want true")
+	}
+	if got, ok := sm.Get("empty"); !ok || got != "set" {
+		t.Fatalf("Get(empty) = (%q, %v), want (set, true)", got, ok)
+	}
+}
+
 func TestGetConcurrentWithSet(t *testing.T) {
 	sm := NewStateMachine()
-	if err := sm.Apply(Command{Type: CommandTypePut, Key: "x", Value: "start"}); err != nil {
+	if _, err := sm.Apply(Command{Type: CommandTypePut, Key: "x", Value: "start"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -109,7 +163,7 @@ func TestGetConcurrentWithSet(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 200; i++ {
-			_ = sm.Apply(Command{Type: CommandTypePut, Key: "x", Value: "v"})
+			_, _ = sm.Apply(Command{Type: CommandTypePut, Key: "x", Value: "v"})
 		}
 	}()
 	go func() {

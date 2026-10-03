@@ -34,6 +34,7 @@ Every record gets a `uint64 index`, starting at 1, strictly increasing, no gaps.
 ```
 payload (v2):
 [ version:1B ][ index:8B ][ op:1B ][ key_len:4B ][ key ][ val_len:4B ][ value ]
+[ exp_len:4B ][ expected ]   // CAS only
 ```
 
 - Replay checks `index == previous + 1`. A gap or repeat is corruption, not a torn tail.

@@ -13,6 +13,73 @@ import (
 	"github.com/deepanker/deepstore/internal/engine"
 )
 
+func TestCASRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	e, err := engine.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(e, ln.Addr().String())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- s.Serve(ln)
+	}()
+
+	c := client.New("http://" + ln.Addr().String())
+	ctx := context.Background()
+	if _, err := c.Put(ctx, "k", "old"); err != nil {
+		t.Fatal(err)
+	}
+	index, swapped, err := c.CAS(ctx, "k", "stale", "nope")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if index != 2 || swapped {
+		t.Fatalf("CAS mismatch = (%d, %v), want (2, false)", index, swapped)
+	}
+	index, swapped, err = c.CAS(ctx, "k", "old", "new")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if index != 3 || !swapped {
+		t.Fatalf("CAS match = (%d, %v), want (3, true)", index, swapped)
+	}
+	got, ok, err := c.Get(ctx, "k")
+	if err != nil || !ok || got != "new" {
+		t.Fatalf("Get(k) = (%q, %v, %v), want (new, true, nil)", got, ok, err)
+	}
+
+	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.Shutdown(shutCtx); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not stop")
+	}
+
+	e, err = engine.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	if v, ok := e.Get("k"); !ok || v != "new" {
+		t.Fatalf("Get(k) after restart = (%q, %v), want (new, true)", v, ok)
+	}
+}
+
 func TestPutGetDeleteRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	e, err := engine.Open(dir)

@@ -30,6 +30,8 @@ func main() {
 		os.Exit(getCmd(os.Args[2:]))
 	case "delete":
 		os.Exit(deleteCmd(os.Args[2:]))
+	case "cas":
+		os.Exit(casCmd(os.Args[2:]))
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", os.Args[1])
 		usage()
@@ -164,6 +166,28 @@ func deleteCmd(args []string) int {
 	return 0
 }
 
+func casCmd(args []string) int {
+	fs, addr := clientFlags("cas")
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: deepstore cas [-addr URL] KEY EXPECTED VALUE\n\n")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 3 {
+		fs.Usage()
+		return 2
+	}
+	index, swapped, err := client.New(*addr).CAS(context.Background(), fs.Arg(0), fs.Arg(1), fs.Arg(2))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cas: %v\n", err)
+		return 1
+	}
+	fmt.Printf("%d %t\n", index, swapped)
+	return 0
+}
+
 func clientFlags(name string) (*flag.FlagSet, *string) {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -177,5 +201,6 @@ func usage() {
   deepstore put [-addr URL] KEY VALUE
   deepstore get [-addr URL] KEY
   deepstore delete [-addr URL] KEY
+  deepstore cas [-addr URL] KEY EXPECTED VALUE
 `)
 }

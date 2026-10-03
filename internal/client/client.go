@@ -66,6 +66,29 @@ func (c *Client) Get(ctx context.Context, key string) (string, bool, error) {
 	return out.Value, true, nil
 }
 
+func (c *Client) CAS(ctx context.Context, key, expected, value string) (uint64, bool, error) {
+	body, err := json.Marshal(struct {
+		Expected string `json:"expected"`
+		Value    string `json:"value"`
+	}{Expected: expected, Value: value})
+	if err != nil {
+		return 0, false, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.keyURL(key)+"/cas", bytes.NewReader(body))
+	if err != nil {
+		return 0, false, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	var out struct {
+		Index   uint64 `json:"index"`
+		Swapped bool   `json:"swapped"`
+	}
+	if err := c.do(req, &out); err != nil {
+		return 0, false, err
+	}
+	return out.Index, out.Swapped, nil
+}
+
 func (c *Client) Delete(ctx context.Context, key string) (uint64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.keyURL(key), nil)
 	if err != nil {

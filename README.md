@@ -7,6 +7,7 @@ A key-value store for learning how a durable, linearizable node works. The end g
 ```
 go run ./cmd/deepstore serve -data-dir ./data
 go run ./cmd/deepstore put name ada
+go run ./cmd/deepstore cas name ada grace
 go run ./cmd/deepstore get name
 go run ./cmd/deepstore delete name
 ```
@@ -18,16 +19,17 @@ go run ./cmd/deepstore delete name
 | `PUT` | `/v1/keys/{key}` | `{"value":"..."}` | `{"index":N}` |
 | `GET` | `/v1/keys/{key}` | | `{"value":"..."}`, or 404 |
 | `DELETE` | `/v1/keys/{key}` | | `{"index":N}` |
+| `POST` | `/v1/keys/{key}/cas` | `{"expected":"...","value":"..."}` | `{"index":N,"swapped":true}` |
 
 ## A write
 
-One writer drains the queue, appends the batch, calls `Sync` once, then applies each record in index order. Several writes share that fsync. `write` only copies bytes into the kernel cache.
+One writer drains the queue, appends the batch, calls `Sync` once, then applies each record in index order. Several writes share that fsync. `write` only copies bytes into the kernel cache. Compare-and-swap uses that same path: the record is appended either way, and the map changes only when the key is present and equals `expected`. A miss still advances the index. `swapped` is false and the value stays as it was.
 
 If `Sync` fails, nothing in that batch is applied. Later writes fail until the process is restarted, and restart replays whatever is actually in the file.
 
 ## Recovery
 
-Each record is a CRC32, a length, and a versioned payload: index, operation, key, value. Indices start at 1 and increase by one. On open, the log is replayed onto an empty map.
+Each record is a CRC32, a length, and a versioned payload: index, operation, key, value, and for compare-and-swap the expected value. Indices start at 1 and increase by one. On open, the log is replayed onto an empty map.
 
 A torn tail is truncated back to the last good record. That is a short read at the end of the file, or a bad checksum with no valid record after it. A bad checksum followed by a valid record, an index gap or repeat, an unknown version, or a length past the maximum is corruption, and open fails.
 
@@ -45,7 +47,7 @@ The log index and the applied index are equal after every acknowledgement. They 
 | `internal/server` | HTTP API over the engine. |
 | `cmd/deepstore` | `serve`, plus a small client. |
 
-Client sessions, conditional writes, snapshots, and more than one node are still ahead.
+Client sessions, snapshots, and more than one node are still ahead.
 
 - [docs/phase1-engine.md](docs/phase1-engine.md) — record layout, fsync policy, replay rules
 - [docs/phase2-node.md](docs/phase2-node.md) — the node this is growing into

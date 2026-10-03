@@ -118,7 +118,8 @@ func TestWALReplayAppliesToStateMachine(t *testing.T) {
 		default:
 			t.Fatalf("unexpected op: %s", r.OpType)
 		}
-		return sm.Apply(cmd)
+		_, err := sm.Apply(cmd)
+		return err
 	})
 	if err != nil {
 		t.Fatal(err)
