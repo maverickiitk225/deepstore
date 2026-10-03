@@ -21,12 +21,16 @@ One record is one atomic mutation. Length-prefix so you know how many bytes to r
 [ crc32 ][ length ][ payload ]
    4B        4B       length bytes
 
-payload:
+payload v2:
 [ version:1B ][ index:8B ][ op:1B ][ key_len:4B ][ key ][ val_len:4B ][ value ]
 [ exp_len:4B ][ expected ]   // CAS only, after value
+
+payload v3 adds, after index:
+[ client_id:8B ][ seq:8B ]
 ```
 
-- `version`: `2`. Any other version is corruption.
+- `version`: `2` has no client session and still replays. `3` is a write from a client session. Any other version is corruption.
+- `client_id`, `seq`: both required and non-zero on version 3. Sequence `1` is the client's first command. The next command is `lastSeq + 1`. The same sequence returns the original result and does not append again.
 - `index`: unsigned 64-bit, starting at 1. Each record must be the previous index plus 1. A gap or a repeat is corruption, not a torn tail.
 - `op`: `1` = Put, `2` = Delete, `3` = CAS. Delete still carries `val_len = 0`. CAS carries the new value in `value` and the compared value in `expected`. The swap happens only when the key is present and equals `expected`. A missing key does not match. The record is still appended, so replay sees the same no-op.
 - `crc32`: IEEE CRC of `length || payload` (not including the CRC field).

@@ -3,6 +3,8 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,28 +12,52 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
 type Client struct {
-	base string
-	hc   *http.Client
+	base     string
+	hc       *http.Client
+	clientID uint64
+	seq      atomic.Uint64
 }
 
 func New(addr string) *Client {
 	if !strings.Contains(addr, "://") {
 		addr = "http://" + addr
 	}
+	var buf [8]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		panic(fmt.Sprintf("client: random id: %v", err))
+	}
+	id := binary.LittleEndian.Uint64(buf[:])
+	if id == 0 {
+		id = 1
+	}
 	return &Client{
-		base: strings.TrimRight(addr, "/"),
-		hc:   &http.Client{Timeout: 30 * time.Second},
+		base:     strings.TrimRight(addr, "/"),
+		hc:       &http.Client{Timeout: 30 * time.Second},
+		clientID: id,
 	}
 }
 
+// NextSeq returns the next sequence for a new command. A retry of a command
+// whose response was lost must reuse the sequence from the first attempt.
+func (c *Client) NextSeq() uint64 {
+	return c.seq.Add(1)
+}
+
 func (c *Client) Put(ctx context.Context, key, value string) (uint64, error) {
+	return c.PutSeq(ctx, key, value, c.NextSeq())
+}
+
+func (c *Client) PutSeq(ctx context.Context, key, value string, seq uint64) (uint64, error) {
 	body, err := json.Marshal(struct {
-		Value string `json:"value"`
-	}{Value: value})
+		Value    string `json:"value"`
+		ClientID uint64 `json:"client_id"`
+		Seq      uint64 `json:"seq"`
+	}{Value: value, ClientID: c.clientID, Seq: seq})
 	if err != nil {
 		return 0, err
 	}
@@ -67,10 +93,16 @@ func (c *Client) Get(ctx context.Context, key string) (string, bool, error) {
 }
 
 func (c *Client) CAS(ctx context.Context, key, expected, value string) (uint64, bool, error) {
+	return c.CASSeq(ctx, key, expected, value, c.NextSeq())
+}
+
+func (c *Client) CASSeq(ctx context.Context, key, expected, value string, seq uint64) (uint64, bool, error) {
 	body, err := json.Marshal(struct {
 		Expected string `json:"expected"`
 		Value    string `json:"value"`
-	}{Expected: expected, Value: value})
+		ClientID uint64 `json:"client_id"`
+		Seq      uint64 `json:"seq"`
+	}{Expected: expected, Value: value, ClientID: c.clientID, Seq: seq})
 	if err != nil {
 		return 0, false, err
 	}
@@ -90,10 +122,22 @@ func (c *Client) CAS(ctx context.Context, key, expected, value string) (uint64, 
 }
 
 func (c *Client) Delete(ctx context.Context, key string) (uint64, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.keyURL(key), nil)
+	return c.DeleteSeq(ctx, key, c.NextSeq())
+}
+
+func (c *Client) DeleteSeq(ctx context.Context, key string, seq uint64) (uint64, error) {
+	body, err := json.Marshal(struct {
+		ClientID uint64 `json:"client_id"`
+		Seq      uint64 `json:"seq"`
+	}{ClientID: c.clientID, Seq: seq})
 	if err != nil {
 		return 0, err
 	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.keyURL(key), bytes.NewReader(body))
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
 	var out struct {
 		Index uint64 `json:"index"`
 	}

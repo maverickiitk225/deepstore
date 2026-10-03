@@ -81,6 +81,31 @@ func TestEncodeDecodeCASEmptyExpected(t *testing.T) {
 	}
 }
 
+func TestEncodeDecodeSession(t *testing.T) {
+	in := Record{Index: 3, ClientID: 9, Seq: 2, OpType: OpTypeCAS, Key: "k", Value: "new", Expected: "old"}
+	frame, err := in.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out Record
+	if err := out.Decode(frame); err != nil {
+		t.Fatal(err)
+	}
+	if out != in {
+		t.Fatalf("round-trip: got %+v, want %+v", out, in)
+	}
+	if frame[8] != formatV3 {
+		t.Fatalf("version = %d, want %d", frame[8], formatV3)
+	}
+}
+
+func TestEncodeSessionRequiresBothFields(t *testing.T) {
+	_, err := Record{Index: 1, ClientID: 4, OpType: OpTypePut, Key: "k", Value: "v"}.Encode()
+	if err == nil {
+		t.Fatal("Encode client without seq: err = nil, want error")
+	}
+}
+
 func TestEncodeExpectedOnPut(t *testing.T) {
 	_, err := Record{Index: 1, OpType: OpTypePut, Key: "k", Value: "v", Expected: "x"}.Encode()
 	if err == nil {
@@ -134,7 +159,7 @@ func TestDecodeUnknownVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	frame[8] = formatVersion + 1
+	frame[8] = 9
 	payloadLen := binary.LittleEndian.Uint32(frame[4:8])
 	payload := frame[8 : 8+payloadLen]
 	lengthBuf := make([]byte, 4)

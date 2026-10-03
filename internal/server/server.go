@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/deepanker/deepstore/internal/engine"
+	"github.com/deepanker/deepstore/internal/errs"
 )
 
 const maxBody = 16<<20 + 1024
@@ -52,15 +53,21 @@ func (s *Server) Shutdown(ctx context.Context) error {
 func (s *Server) put(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
 	var body struct {
-		Value string `json:"value"`
+		Value    string `json:"value"`
+		ClientID uint64 `json:"client_id"`
+		Seq      uint64 `json:"seq"`
 	}
 	if err := decodeJSON(w, r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	index, err := s.eng.Put(key, body.Value)
+	if err := requireSession(body.ClientID, body.Seq); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	index, err := s.eng.Put(key, body.Value, body.ClientID, body.Seq)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+		writeStatus(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, struct {
@@ -84,14 +91,20 @@ func (s *Server) cas(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Expected string `json:"expected"`
 		Value    string `json:"value"`
+		ClientID uint64 `json:"client_id"`
+		Seq      uint64 `json:"seq"`
 	}
 	if err := decodeJSON(w, r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	index, swapped, err := s.eng.CAS(key, body.Expected, body.Value)
+	if err := requireSession(body.ClientID, body.Seq); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	index, swapped, err := s.eng.CAS(key, body.Expected, body.Value, body.ClientID, body.Seq)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+		writeStatus(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, struct {
@@ -101,9 +114,21 @@ func (s *Server) cas(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) delete(w http.ResponseWriter, r *http.Request) {
-	index, err := s.eng.Delete(r.PathValue("key"))
+	var body struct {
+		ClientID uint64 `json:"client_id"`
+		Seq      uint64 `json:"seq"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := requireSession(body.ClientID, body.Seq); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	index, err := s.eng.Delete(r.PathValue("key"), body.ClientID, body.Seq)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+		writeStatus(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, struct {
@@ -121,6 +146,21 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func requireSession(clientID, seq uint64) error {
+	if clientID == 0 || seq == 0 {
+		return errors.New("client_id and seq are required")
+	}
+	return nil
+}
+
+func writeStatus(w http.ResponseWriter, err error) {
+	if errors.Is(err, errs.ErrSession) {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeError(w, http.StatusInternalServerError, err)
 }
 
 func writeError(w http.ResponseWriter, status int, err error) {

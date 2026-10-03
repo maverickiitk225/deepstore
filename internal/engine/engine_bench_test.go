@@ -34,7 +34,7 @@ func BenchmarkPutConcurrent(b *testing.B) {
 							return
 						}
 						start := time.Now()
-						if _, err := e.Put(fmt.Sprintf("k%d", i), "value"); err != nil {
+						if _, err := e.Put(fmt.Sprintf("k%d", i), "value", uint64(i), 1); err != nil {
 							b.Error(err)
 							return
 						}

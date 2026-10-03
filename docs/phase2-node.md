@@ -32,10 +32,12 @@ The CLI currently opens the WAL, does one op, exits. A Raft node is a process th
 Every record gets a `uint64 index`, starting at 1, strictly increasing, no gaps.
 
 ```
-payload (v2):
-[ version:1B ][ index:8B ][ op:1B ][ key_len:4B ][ key ][ val_len:4B ][ value ]
+payload (v3):
+[ version:1B ][ index:8B ][ client_id:8B ][ seq:8B ][ op:1B ][ key_len:4B ][ key ][ val_len:4B ][ value ]
 [ exp_len:4B ][ expected ]   // CAS only
 ```
+
+Version 2 records have no `client_id` or `seq` and still replay.
 
 - Replay checks `index == previous + 1`. A gap or repeat is corruption, not a torn tail.
 - The engine tracks `lastIndex` (last on disk) and `appliedIndex` (last applied to the map). In Phase 2 they are equal after every ack. In Phase 3 they diverge and `commitIndex` sits between them.

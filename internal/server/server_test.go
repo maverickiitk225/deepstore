@@ -80,6 +80,49 @@ func TestCASRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSessionRetryAndGap(t *testing.T) {
+	e, err := engine.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(e, ln.Addr().String())
+	go func() {
+		_ = s.Serve(ln)
+	}()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = s.Shutdown(ctx)
+		_ = e.Close()
+	})
+
+	c := client.New("http://" + ln.Addr().String())
+	ctx := context.Background()
+	seq := c.NextSeq()
+	index, err := c.PutSeq(ctx, "k", "v", seq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := c.PutSeq(ctx, "k", "other", seq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again != index {
+		t.Fatalf("retry index = %d, want %d", again, index)
+	}
+	got, ok, err := c.Get(ctx, "k")
+	if err != nil || !ok || got != "v" {
+		t.Fatalf("Get = (%q, %v, %v), want (v, true, nil)", got, ok, err)
+	}
+	if _, err := c.PutSeq(ctx, "k", "nope", seq+2); err == nil {
+		t.Fatal("gap: err = nil, want error")
+	}
+}
+
 func TestPutGetDeleteRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	e, err := engine.Open(dir)

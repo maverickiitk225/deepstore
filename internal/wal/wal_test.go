@@ -410,7 +410,7 @@ func TestReplayRejectsUnknownVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	frame[8] = formatVersion + 1
+	frame[8] = 9
 	payloadLen := binary.LittleEndian.Uint32(frame[4:8])
 	payload := frame[8 : 8+payloadLen]
 	lengthBuf := make([]byte, 4)

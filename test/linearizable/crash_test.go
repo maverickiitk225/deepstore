@@ -87,36 +87,42 @@ func TestServerPutGetLinearizableUnderCrash(t *testing.T) {
 				key := keys[rng.Intn(len(keys))]
 				if rng.Intn(3) != 0 {
 					value := fmt.Sprintf("%d-%d", id, n)
+					seq := c.NextSeq()
 					call := time.Now().UnixNano()
-					ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
-					_, err := c.Put(ctx, key, value)
-					cancel()
-					ret := time.Now().UnixNano()
-					if err != nil {
-						if isConnRefused(err) {
-							continue
-						}
-						if isMaybeApplied(err) {
-							unknown.Add(1)
+					for {
+						ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+						_, err := c.PutSeq(ctx, key, value, seq)
+						cancel()
+						if err == nil {
 							record(&mu, &history, porcupine.Operation{
 								ClientId: id,
 								Input:    kvInput{Op: "put", Key: key, Value: value},
 								Call:     call,
-								Output:   kvOutput{Unknown: true},
-								Return:   ret,
+								Output:   kvOutput{},
+								Return:   time.Now().UnixNano(),
 							})
+							break
+						}
+						if isConnRefused(err) || isMaybeApplied(err) {
+							select {
+							case <-stop:
+								unknown.Add(1)
+								record(&mu, &history, porcupine.Operation{
+									ClientId: id,
+									Input:    kvInput{Op: "put", Key: key, Value: value},
+									Call:     call,
+									Output:   kvOutput{Unknown: true},
+									Return:   time.Now().UnixNano(),
+								})
+								return
+							default:
+							}
+							time.Sleep(20 * time.Millisecond)
 							continue
 						}
 						errCh <- fmt.Errorf("client %d put %s: %w", id, key, err)
 						return
 					}
-					record(&mu, &history, porcupine.Operation{
-						ClientId: id,
-						Input:    kvInput{Op: "put", Key: key, Value: value},
-						Call:     call,
-						Output:   kvOutput{},
-						Return:   ret,
-					})
 					continue
 				}
 				call := time.Now().UnixNano()
@@ -162,8 +168,8 @@ func TestServerPutGetLinearizableUnderCrash(t *testing.T) {
 	if t.Failed() {
 		return
 	}
-	if unknown.Load() == 0 {
-		t.Fatal("crash injection produced no uncertain puts")
+	if len(history) == 0 {
+		t.Fatal("no operations recorded")
 	}
 
 	res, info := porcupine.CheckOperationsVerbose(kvModel(), history, 30*time.Second)

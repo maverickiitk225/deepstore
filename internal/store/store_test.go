@@ -152,6 +152,49 @@ func TestApplyCAS(t *testing.T) {
 	}
 }
 
+func TestApplySession(t *testing.T) {
+	sm := NewStateMachine()
+	res, err := sm.Apply(Command{Type: CommandTypePut, Key: "k", Value: "v", ClientID: 7, Seq: 1, Index: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Index != 4 {
+		t.Fatalf("index = %d, want 4", res.Index)
+	}
+	res, err = sm.Apply(Command{Type: CommandTypePut, Key: "k", Value: "other", ClientID: 7, Seq: 1, Index: 9})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Index != 4 {
+		t.Fatalf("retry index = %d, want 4", res.Index)
+	}
+	if got, ok := sm.Get("k"); !ok || got != "v" {
+		t.Fatalf("Get = (%q, %v), want (v, true)", got, ok)
+	}
+	if _, err := sm.Apply(Command{Type: CommandTypePut, Key: "k", Value: "x", ClientID: 7, Seq: 3, Index: 10}); err == nil {
+		t.Fatal("gap: err = nil, want error")
+	}
+	res, err = sm.Apply(Command{Type: CommandTypeCAS, Key: "k", Expected: "v", Value: "n", ClientID: 7, Seq: 2, Index: 5})
+	if err != nil || !res.Swapped || res.Index != 5 {
+		t.Fatalf("CAS = (%+v, %v), want swapped at 5", res, err)
+	}
+	res, err = sm.Apply(Command{Type: CommandTypeCAS, Key: "k", Expected: "nope", Value: "z", ClientID: 8, Seq: 1, Index: 6})
+	if err != nil || res.Swapped {
+		t.Fatalf("other client CAS = (%+v, %v), want not swapped", res, err)
+	}
+	res, err = sm.Apply(Command{Type: CommandTypePut, Key: "k", Value: "nope", ClientID: 9, Seq: 1, Index: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err = sm.Apply(Command{Type: CommandTypeCAS, Key: "k", Expected: "nope", Value: "z", ClientID: 8, Seq: 1, Index: 99})
+	if err != nil || res.Swapped || res.Index != 6 {
+		t.Fatalf("CAS retry = (%+v, %v), want index 6 not swapped", res, err)
+	}
+	if got, ok := sm.Get("k"); !ok || got != "nope" {
+		t.Fatalf("Get = (%q, %v), want (nope, true)", got, ok)
+	}
+}
+
 func TestGetConcurrentWithSet(t *testing.T) {
 	sm := NewStateMachine()
 	if _, err := sm.Apply(Command{Type: CommandTypePut, Key: "x", Value: "start"}); err != nil {

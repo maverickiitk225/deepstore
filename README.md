@@ -16,14 +16,16 @@ go run ./cmd/deepstore delete name
 
 | Method | Path | Request | Response |
 | --- | --- | --- | --- |
-| `PUT` | `/v1/keys/{key}` | `{"value":"..."}` | `{"index":N}` |
+| `PUT` | `/v1/keys/{key}` | `{"value":"...","client_id":N,"seq":N}` | `{"index":N}` |
 | `GET` | `/v1/keys/{key}` | | `{"value":"..."}`, or 404 |
-| `DELETE` | `/v1/keys/{key}` | | `{"index":N}` |
-| `POST` | `/v1/keys/{key}/cas` | `{"expected":"...","value":"..."}` | `{"index":N,"swapped":true}` |
+| `DELETE` | `/v1/keys/{key}` | `{"client_id":N,"seq":N}` | `{"index":N}` |
+| `POST` | `/v1/keys/{key}/cas` | `{"expected":"...","value":"...","client_id":N,"seq":N}` | `{"index":N,"swapped":true}` |
 
 ## A write
 
 One writer drains the queue, appends the batch, calls `Sync` once, then applies each record in index order. Several writes share that fsync. `write` only copies bytes into the kernel cache. Compare-and-swap uses that same path: the record is appended either way, and the map changes only when the key is present and equals `expected`. A miss still advances the index. `swapped` is false and the value stays as it was.
+
+Each write carries a client id and a sequence number. The id is chosen by the client. Sequence 1 is that client's first command, and each new command adds one. The state machine remembers the latest sequence and its result. Sending that sequence again returns the original index and the original `swapped` flag, and does not append. The CLI picks a new id per process and uses sequence 1 for its single command.
 
 If `Sync` fails, nothing in that batch is applied. Later writes fail until the process is restarted, and restart replays whatever is actually in the file.
 
@@ -47,7 +49,7 @@ The log index and the applied index are equal after every acknowledgement. They 
 | `internal/server` | HTTP API over the engine. |
 | `cmd/deepstore` | `serve`, plus a small client. |
 
-Client sessions, snapshots, and more than one node are still ahead.
+Snapshots and more than one node are still ahead.
 
 - [docs/phase1-engine.md](docs/phase1-engine.md) — record layout, fsync policy, replay rules
 - [docs/phase2-node.md](docs/phase2-node.md) — the node this is growing into

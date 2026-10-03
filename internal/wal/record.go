@@ -23,15 +23,19 @@ const (
 	opCAS    byte = 3
 )
 
-// formatVersion is the payload version written by Encode.
-// A later version can add fields such as Raft term; this one is rejected
-// rather than parsed as that layout.
-const formatVersion byte = 2
+const (
+	// formatV2 is a record with no client session. Replay still accepts it.
+	formatV2 byte = 2
+	// formatV3 adds client id and sequence after the index.
+	formatV3 byte = 3
+)
 
 const maxPayloadSize uint32 = 16 << 20
 
 type Record struct {
 	Index    uint64
+	ClientID uint64
+	Seq      uint64
 	OpType   OpType
 	Key      string
 	Value    string
@@ -51,6 +55,10 @@ func (r Record) Encode() ([]byte, error) {
 		return nil, fmt.Errorf("wal: index must be positive")
 	}
 
+	version, err := r.version()
+	if err != nil {
+		return nil, err
+	}
 	if r.OpType != OpTypeCAS && r.Expected != "" {
 		return nil, fmt.Errorf("wal: expected set on %s", r.OpType)
 	}
@@ -76,6 +84,9 @@ func (r Record) Encode() ([]byte, error) {
 	}
 
 	payloadLen := 1 + 8 + 1 + 4 + len(key) + 4 + len(value)
+	if version == formatV3 {
+		payloadLen += 16
+	}
 	if r.OpType == OpTypeCAS {
 		payloadLen += 4 + len(expected)
 	}
@@ -83,10 +94,17 @@ func (r Record) Encode() ([]byte, error) {
 		return nil, fmt.Errorf("wal: payload too long")
 	}
 	payload := make([]byte, payloadLen)
-	payload[0] = formatVersion
+	payload[0] = version
 	binary.LittleEndian.PutUint64(payload[1:9], r.Index)
-	payload[9] = op
-	off := 10
+	off := 9
+	if version == formatV3 {
+		binary.LittleEndian.PutUint64(payload[off:], r.ClientID)
+		off += 8
+		binary.LittleEndian.PutUint64(payload[off:], r.Seq)
+		off += 8
+	}
+	payload[off] = op
+	off++
 	binary.LittleEndian.PutUint32(payload[off:], uint32(len(key)))
 	off += 4
 	copy(payload[off:], key)
@@ -136,16 +154,32 @@ func (r *Record) Decode(data []byte) error {
 	if len(payload) < 1 {
 		return fmt.Errorf("wal: payload too short")
 	}
-	if payload[0] != formatVersion {
-		return fmt.Errorf("wal: unknown version: %d", payload[0])
+	version := payload[0]
+	if version != formatV2 && version != formatV3 {
+		return fmt.Errorf("wal: unknown version: %d", version)
 	}
-	if len(payload) < 1+8+1+4+4 {
+	header := 1 + 8 + 1 + 4 + 4
+	if version == formatV3 {
+		header += 16
+	}
+	if len(payload) < header {
 		return fmt.Errorf("wal: payload too short")
 	}
 
 	index := binary.LittleEndian.Uint64(payload[1:9])
-	op := payload[9]
-	off := 10
+	off := 9
+	var clientID, seq uint64
+	if version == formatV3 {
+		clientID = binary.LittleEndian.Uint64(payload[off:])
+		off += 8
+		seq = binary.LittleEndian.Uint64(payload[off:])
+		off += 8
+		if clientID == 0 || seq == 0 {
+			return fmt.Errorf("wal: client id and seq are required")
+		}
+	}
+	op := payload[off]
+	off++
 	keyLen := binary.LittleEndian.Uint32(payload[off:])
 	off += 4
 	if keyLen == 0 {
@@ -194,11 +228,23 @@ func (r *Record) Decode(data []byte) error {
 	}
 
 	r.Index = index
+	r.ClientID = clientID
+	r.Seq = seq
 	r.OpType = opType
 	r.Key = string(key)
 	r.Value = string(value)
 	r.Expected = string(expected)
 	return nil
+}
+
+func (r Record) version() (byte, error) {
+	if r.ClientID == 0 && r.Seq == 0 {
+		return formatV2, nil
+	}
+	if r.ClientID == 0 || r.Seq == 0 {
+		return 0, fmt.Errorf("wal: client id and seq are required")
+	}
+	return formatV3, nil
 }
 
 func encodeOp(t OpType) (byte, error) {

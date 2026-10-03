@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,8 +11,24 @@ import (
 	"testing"
 	"time"
 
+	"github.com/deepanker/deepstore/internal/errs"
 	"github.com/deepanker/deepstore/internal/wal"
 )
+
+var freshClient atomic.Uint64
+
+// put1, del1, and cas1 are separate clients, each sending sequence 1.
+func put1(e *Engine, key, value string) (uint64, error) {
+	return e.Put(key, value, freshClient.Add(1), 1)
+}
+
+func del1(e *Engine, key string) (uint64, error) {
+	return e.Delete(key, freshClient.Add(1), 1)
+}
+
+func cas1(e *Engine, key, expected, value string) (uint64, bool, error) {
+	return e.CAS(key, expected, value, freshClient.Add(1), 1)
+}
 
 func TestEnginePutGetReopen(t *testing.T) {
 	dir := t.TempDir()
@@ -20,7 +37,7 @@ func TestEnginePutGetReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.Put("k", "v"); err != nil {
+	if _, err := put1(e, "k", "v"); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.Close(); err != nil {
@@ -46,10 +63,10 @@ func TestEngineDeleteReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.Put("k", "v"); err != nil {
+	if _, err := put1(e, "k", "v"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.Delete("k"); err != nil {
+	if _, err := del1(e, "k"); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.Close(); err != nil {
@@ -74,7 +91,7 @@ func TestEngineCAS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	index, err := e.Put("k", "old")
+	index, err := put1(e, "k", "old")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +99,7 @@ func TestEngineCAS(t *testing.T) {
 		t.Fatalf("Put index = %d, want 1", index)
 	}
 
-	index, swapped, err := e.CAS("k", "stale", "nope")
+	index, swapped, err := cas1(e, "k", "stale", "nope")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +110,7 @@ func TestEngineCAS(t *testing.T) {
 		t.Fatalf("Get after mismatch = (%q, %v), want (old, true)", got, ok)
 	}
 
-	index, swapped, err = e.CAS("k", "old", "new")
+	index, swapped, err = cas1(e, "k", "old", "new")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +118,7 @@ func TestEngineCAS(t *testing.T) {
 		t.Fatalf("CAS match = (%d, %v), want (3, true)", index, swapped)
 	}
 
-	index, swapped, err = e.CAS("missing", "", "x")
+	index, swapped, err = cas1(e, "missing", "", "x")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +128,7 @@ func TestEngineCAS(t *testing.T) {
 	if _, ok := e.Get("missing"); ok {
 		t.Fatal("Get(missing) after CAS: ok = true, want false")
 	}
-	if _, _, err := e.CAS("", "a", "b"); err == nil {
+	if _, _, err := cas1(e, "", "a", "b"); err == nil {
 		t.Fatal("CAS empty key: err = nil, want error")
 	}
 
@@ -147,7 +164,7 @@ func TestEngineCASSeesEarlierRecordInBatch(t *testing.T) {
 	var putErr error
 	go func() {
 		defer close(putDone)
-		putIndex, putErr = e.Put("k", "old")
+		putIndex, putErr = put1(e, "k", "old")
 	}()
 	waitQueued(t, e, 1)
 
@@ -157,7 +174,7 @@ func TestEngineCASSeesEarlierRecordInBatch(t *testing.T) {
 	var casErr error
 	go func() {
 		defer close(casDone)
-		casIndex, swapped, casErr = e.CAS("k", "old", "new")
+		casIndex, swapped, casErr = cas1(e, "k", "old", "new")
 	}()
 	waitQueued(t, e, 2)
 
@@ -185,7 +202,7 @@ func TestEngineCASOneWinner(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer e.Close()
-	if _, err := e.Put("k", "old"); err != nil {
+	if _, err := put1(e, "k", "old"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -197,7 +214,7 @@ func TestEngineCASOneWinner(t *testing.T) {
 	for i := 0; i < n; i++ {
 		go func(i int) {
 			defer wg.Done()
-			_, wins[i], errs[i] = e.CAS("k", "old", fmt.Sprintf("w%d", i))
+			_, wins[i], errs[i] = cas1(e, "k", "old", fmt.Sprintf("w%d", i))
 		}(i)
 	}
 	wg.Wait()
@@ -228,10 +245,10 @@ func TestEngineEmptyKey(t *testing.T) {
 	}
 	defer e.Close()
 
-	if _, err := e.Put("", "v"); err == nil {
+	if _, err := put1(e, "", "v"); err == nil {
 		t.Fatal("Put empty key: err = nil, want error")
 	}
-	if _, err := e.Delete(""); err == nil {
+	if _, err := del1(e, ""); err == nil {
 		t.Fatal("Delete empty key: err = nil, want error")
 	}
 }
@@ -243,10 +260,10 @@ func TestEngineTornTailAfterReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.Put("ok", "1"); err != nil {
+	if _, err := put1(e, "ok", "1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.Put("lost", "2"); err != nil {
+	if _, err := put1(e, "lost", "2"); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.Close(); err != nil {
@@ -289,7 +306,7 @@ func TestEngineConcurrentPutSameKey(t *testing.T) {
 		go func(i int) {
 			defer func() { done <- struct{}{} }()
 			val := string(rune('a' + i%26))
-			_, _ = e.Put("hot", val)
+			_, _ = put1(e, "hot", val)
 		}(i)
 	}
 	for i := 0; i < n; i++ {
@@ -317,7 +334,7 @@ func TestEngineCloseWaitsForInFlightPuts(t *testing.T) {
 	for i := 0; i < n; i++ {
 		go func(i int) {
 			defer wg.Done()
-			_, errs[i] = e.Put(fmt.Sprintf("k%d", i), "v")
+			_, errs[i] = put1(e, fmt.Sprintf("k%d", i), "v")
 		}(i)
 	}
 	if err := e.Close(); err != nil {
@@ -328,10 +345,10 @@ func TestEngineCloseWaitsForInFlightPuts(t *testing.T) {
 	if err := e.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.Put("after", "x"); err == nil {
+	if _, err := put1(e, "after", "x"); err == nil {
 		t.Fatal("Put after Close: err = nil, want error")
 	}
-	if _, err := e.Delete("after"); err == nil {
+	if _, err := del1(e, "after"); err == nil {
 		t.Fatal("Delete after Close: err = nil, want error")
 	}
 
@@ -363,13 +380,13 @@ func TestEngineSyncFailurePoisons(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.Put("ok", "1"); err != nil {
+	if _, err := put1(e, "ok", "1"); err != nil {
 		t.Fatal(err)
 	}
 
 	e.setSyncHook(func() error { return fmt.Errorf("disk failed") })
 
-	if _, err := e.Put("lost", "2"); err == nil {
+	if _, err := put1(e, "lost", "2"); err == nil {
 		t.Fatal("Put during sync failure: err = nil, want error")
 	}
 	if _, ok := e.Get("lost"); ok {
@@ -389,11 +406,11 @@ func TestEngineSyncFailurePoisons(t *testing.T) {
 	}
 	sizeAfterFailure := info.Size()
 
-	_, err = e.Put("later", "3")
+	_, err = put1(e, "later", "3")
 	if err == nil || !strings.Contains(err.Error(), "poisoned") {
 		t.Fatalf("Put after poison: err = %v, want poisoned", err)
 	}
-	_, err = e.Delete("ok")
+	_, err = del1(e, "ok")
 	if err == nil || !strings.Contains(err.Error(), "poisoned") {
 		t.Fatalf("Delete after poison: err = %v, want poisoned", err)
 	}
@@ -437,13 +454,13 @@ func TestEngineIndexMonotonic(t *testing.T) {
 	if e.LastIndex() != 0 || e.AppliedIndex() != 0 {
 		t.Fatalf("indexes on empty engine = (%d, %d), want (0, 0)", e.LastIndex(), e.AppliedIndex())
 	}
-	if _, err := e.Put("a", "1"); err != nil {
+	if _, err := put1(e, "a", "1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.Put("b", "2"); err != nil {
+	if _, err := put1(e, "b", "2"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.Delete("a"); err != nil {
+	if _, err := del1(e, "a"); err != nil {
 		t.Fatal(err)
 	}
 	if e.LastIndex() != 3 || e.AppliedIndex() != 3 {
@@ -495,7 +512,7 @@ func TestEngineGroupCommitOneSync(t *testing.T) {
 	for i := 0; i < n; i++ {
 		go func(i int) {
 			defer wg.Done()
-			idxs[i], errs[i] = e.Put(fmt.Sprintf("k%d", i), "v")
+			idxs[i], errs[i] = put1(e, fmt.Sprintf("k%d", i), "v")
 		}(i)
 	}
 	waitQueued(t, e, n)
@@ -548,7 +565,7 @@ func TestEngineGroupCommitSyncFailureAcksNobody(t *testing.T) {
 	for i := 0; i < n; i++ {
 		go func(i int) {
 			defer wg.Done()
-			_, errs[i] = e.Put(fmt.Sprintf("k%d", i), "v")
+			_, errs[i] = put1(e, fmt.Sprintf("k%d", i), "v")
 		}(i)
 	}
 	waitQueued(t, e, n)
@@ -577,7 +594,7 @@ func TestEngineGroupCommitSyncFailureAcksNobody(t *testing.T) {
 		t.Fatal(err)
 	}
 	sizeAfterFailure := info.Size()
-	if _, err := e.Put("later", "x"); err == nil || !strings.Contains(err.Error(), "poisoned") {
+	if _, err := put1(e, "later", "x"); err == nil || !strings.Contains(err.Error(), "poisoned") {
 		t.Fatalf("Put after poison: err = %v, want poisoned", err)
 	}
 	info, err = os.Stat(path)
@@ -635,7 +652,7 @@ func TestEngineQueuesWhileSyncing(t *testing.T) {
 
 	firstDone := make(chan error, 1)
 	go func() {
-		_, err := e.Put("a", "1")
+		_, err := put1(e, "a", "1")
 		firstDone <- err
 	}()
 	waitQueued(t, e, 1)
@@ -652,7 +669,7 @@ func TestEngineQueuesWhileSyncing(t *testing.T) {
 	for i := 0; i < extra; i++ {
 		go func(i int) {
 			defer wg.Done()
-			_, errs[i] = e.Put(fmt.Sprintf("k%d", i), "v")
+			_, errs[i] = put1(e, fmt.Sprintf("k%d", i), "v")
 		}(i)
 	}
 	waitQueued(t, e, extra)
@@ -689,7 +706,7 @@ func BenchmarkEngineConcurrentPut(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			id := seq.Add(1)
-			if _, err := e.Put(fmt.Sprintf("k%d", id), "v"); err != nil {
+			if _, err := put1(e, fmt.Sprintf("k%d", id), "v"); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -720,7 +737,7 @@ func TestEngineRejectsInvalidOpBeforeWAL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.Put("ok", "1"); err != nil {
+	if _, err := put1(e, "ok", "1"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -744,7 +761,7 @@ func TestEngineRejectsInvalidOpBeforeWAL(t *testing.T) {
 	if e.LastIndex() != 1 {
 		t.Fatalf("LastIndex = %d, want 1", e.LastIndex())
 	}
-	if _, err := e.Put("next", "2"); err != nil {
+	if _, err := put1(e, "next", "2"); err != nil {
 		t.Fatalf("Put after rejected op: %v", err)
 	}
 	if err := e.Close(); err != nil {
@@ -758,5 +775,201 @@ func TestEngineRejectsInvalidOpBeforeWAL(t *testing.T) {
 	defer e.Close()
 	if v, ok := e.Get("next"); !ok || v != "2" {
 		t.Fatalf("Get(next) after reopen = (%q, %v), want (2, true)", v, ok)
+	}
+}
+
+func TestEngineSessionRetry(t *testing.T) {
+	dir := t.TempDir()
+	e, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, err := e.Put("k", "v", 4, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if index != 1 {
+		t.Fatalf("first index = %d, want 1", index)
+	}
+	path := filepath.Join(dir, "wal.log")
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := e.Put("k", "other", 4, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again != index {
+		t.Fatalf("retry index = %d, want %d", again, index)
+	}
+	if got, ok := e.Get("k"); !ok || got != "v" {
+		t.Fatalf("Get after retry = (%q, %v), want (v, true)", got, ok)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Size() != before.Size() {
+		t.Fatalf("wal size = %d, want %d", after.Size(), before.Size())
+	}
+	if _, err := e.Put("k", "skip", 4, 3); !errors.Is(err, errs.ErrSession) {
+		t.Fatalf("gap err = %v, want session", err)
+	}
+	if e.LastIndex() != 1 {
+		t.Fatalf("LastIndex after gap = %d, want 1", e.LastIndex())
+	}
+	index, err = e.Put("k", "v2", 4, 2)
+	if err != nil || index != 2 {
+		t.Fatalf("seq 2 = (%d, %v), want (2, nil)", index, err)
+	}
+	if err := e.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	e, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	again, err = e.Put("k", "ignored", 4, 2)
+	if err != nil || again != 2 {
+		t.Fatalf("retry after reopen = (%d, %v), want (2, nil)", again, err)
+	}
+	if got, ok := e.Get("k"); !ok || got != "v2" {
+		t.Fatalf("Get after reopen = (%q, %v), want (v2, true)", got, ok)
+	}
+	if _, err := e.Put("k", "old", 4, 1); !errors.Is(err, errs.ErrSession) {
+		t.Fatalf("old seq err = %v, want session", err)
+	}
+}
+
+func TestEngineSessionCASRetryAfterOtherWrite(t *testing.T) {
+	e, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	if _, err := e.Put("k", "old", 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	index, swapped, err := e.CAS("k", "old", "ada", 2, 1)
+	if err != nil || !swapped || index != 2 {
+		t.Fatalf("CAS = (%d, %v, %v), want (2, true, nil)", index, swapped, err)
+	}
+	if _, err := e.Put("k", "grace", 3, 1); err != nil {
+		t.Fatal(err)
+	}
+	again, swapped, err := e.CAS("k", "old", "ada", 2, 1)
+	if err != nil || !swapped || again != index {
+		t.Fatalf("CAS retry = (%d, %v, %v), want (%d, true, nil)", again, swapped, err, index)
+	}
+	if got, ok := e.Get("k"); !ok || got != "grace" {
+		t.Fatalf("Get = (%q, %v), want (grace, true)", got, ok)
+	}
+}
+
+func TestEngineSessionFailedCASStaysFailed(t *testing.T) {
+	e, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	if _, err := e.Put("k", "old", 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	index, swapped, err := e.CAS("k", "stale", "nope", 2, 1)
+	if err != nil || swapped {
+		t.Fatalf("CAS miss = (%d, %v, %v), want swapped false", index, swapped, err)
+	}
+	if _, err := e.Put("k", "stale", 3, 1); err != nil {
+		t.Fatal(err)
+	}
+	again, swapped, err := e.CAS("k", "stale", "nope", 2, 1)
+	if err != nil || swapped || again != index {
+		t.Fatalf("CAS retry = (%d, %v, %v), want (%d, false, nil)", again, swapped, err, index)
+	}
+	if got, ok := e.Get("k"); !ok || got != "stale" {
+		t.Fatalf("Get = (%q, %v), want (stale, true)", got, ok)
+	}
+}
+
+func TestEngineSessionDuplicateInBatch(t *testing.T) {
+	e, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+
+	e.mu.Lock()
+	e.holdBatch = true
+	e.mu.Unlock()
+
+	firstDone := make(chan struct{})
+	var first uint64
+	var firstErr error
+	go func() {
+		defer close(firstDone)
+		first, firstErr = e.Put("k", "first", 9, 1)
+	}()
+	waitQueued(t, e, 1)
+	secondDone := make(chan struct{})
+	var second uint64
+	var secondErr error
+	go func() {
+		defer close(secondDone)
+		second, secondErr = e.Put("k", "second", 9, 1)
+	}()
+	waitQueued(t, e, 2)
+
+	e.mu.Lock()
+	e.holdBatch = false
+	e.cond.Broadcast()
+	e.mu.Unlock()
+	<-firstDone
+	<-secondDone
+	if firstErr != nil || secondErr != nil {
+		t.Fatalf("first %v, second %v", firstErr, secondErr)
+	}
+	if first != 1 || second != 1 {
+		t.Fatalf("indexes = (%d, %d), want (1, 1)", first, second)
+	}
+	if got, ok := e.Get("k"); !ok || got != "first" {
+		t.Fatalf("Get = (%q, %v), want (first, true)", got, ok)
+	}
+	if e.LastIndex() != 1 {
+		t.Fatalf("LastIndex = %d, want 1", e.LastIndex())
+	}
+}
+
+func TestEngineReplaysUnsessionedRecord(t *testing.T) {
+	dir := t.TempDir()
+	w, err := wal.Open(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Append(wal.Record{Index: 1, OpType: wal.OpTypePut, Key: "k", Value: "v"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	e, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	if got, ok := e.Get("k"); !ok || got != "v" {
+		t.Fatalf("Get = (%q, %v), want (v, true)", got, ok)
+	}
+	if _, err := e.Put("k", "v2", 3, 1); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := e.Get("k"); !ok || got != "v2" {
+		t.Fatalf("Get after sessioned put = (%q, %v), want (v2, true)", got, ok)
 	}
 }
