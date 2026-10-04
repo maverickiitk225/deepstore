@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/deepanker/deepstore/internal/errs"
+	"github.com/deepanker/deepstore/internal/snapshot"
 	"github.com/deepanker/deepstore/internal/wal"
 )
 
@@ -971,5 +972,348 @@ func TestEngineReplaysUnsessionedRecord(t *testing.T) {
 	}
 	if got, ok := e.Get("k"); !ok || got != "v2" {
 		t.Fatalf("Get after sessioned put = (%q, %v), want (v2, true)", got, ok)
+	}
+}
+
+func TestEngineSnapshotReopen(t *testing.T) {
+	dir := t.TempDir()
+	e, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.SetSnapshotEvery(0)
+	if err := e.Snapshot(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "snapshot")); !os.IsNotExist(err) {
+		t.Fatalf("empty snapshot stat err = %v, want not exist", err)
+	}
+
+	if _, err := put1(e, "k", "v"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := put1(e, "empty", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := put1(e, "gone", "x"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := del1(e, "gone"); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(dir, "wal.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := info.Size()
+	if err := e.Snapshot(); err != nil {
+		t.Fatal(err)
+	}
+	if e.SnapshotIndex() != 4 || e.LastIndex() != 4 || e.AppliedIndex() != 4 {
+		t.Fatalf("indexes = (%d, %d, %d), want (4, 4, 4)", e.SnapshotIndex(), e.LastIndex(), e.AppliedIndex())
+	}
+	info, err = os.Stat(filepath.Join(dir, "wal.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != before {
+		t.Fatalf("wal size = %d, want %d", info.Size(), before)
+	}
+
+	index, err := put1(e, "tail", "yes")
+	if err != nil || index != 5 {
+		t.Fatalf("tail put = (%d, %v), want (5, nil)", index, err)
+	}
+	info, err = os.Stat(filepath.Join(dir, "wal.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() == 0 {
+		t.Fatal("wal size = 0, want the tail record")
+	}
+	if err := e.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	e, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	if got, ok := e.Get("k"); !ok || got != "v" {
+		t.Fatalf("Get(k) = (%q, %v), want (v, true)", got, ok)
+	}
+	if got, ok := e.Get("empty"); !ok || got != "" {
+		t.Fatalf("Get(empty) = (%q, %v), want (\"\", true)", got, ok)
+	}
+	if _, ok := e.Get("gone"); ok {
+		t.Fatal("Get(gone) after snapshot: ok = true, want false")
+	}
+	if got, ok := e.Get("tail"); !ok || got != "yes" {
+		t.Fatalf("Get(tail) = (%q, %v), want (yes, true)", got, ok)
+	}
+	if e.LastIndex() != 5 || e.AppliedIndex() != 5 || e.SnapshotIndex() != 4 {
+		t.Fatalf("indexes after reopen = (%d, %d, %d), want (5, 5, 4)", e.LastIndex(), e.AppliedIndex(), e.SnapshotIndex())
+	}
+}
+
+func TestEngineSnapshotSessionAndCAS(t *testing.T) {
+	dir := t.TempDir()
+	e, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.SetSnapshotEvery(0)
+	if _, err := e.Put("k", "old", 4, 1); err != nil {
+		t.Fatal(err)
+	}
+	index, swapped, err := e.CAS("k", "stale", "nope", 5, 1)
+	if err != nil || swapped || index != 2 {
+		t.Fatalf("CAS miss = (%d, %v, %v), want (2, false, nil)", index, swapped, err)
+	}
+	okIndex, swapped, err := e.CAS("k", "old", "new", 6, 1)
+	if err != nil || !swapped || okIndex != 3 {
+		t.Fatalf("CAS hit = (%d, %v, %v), want (3, true, nil)", okIndex, swapped, err)
+	}
+	if err := e.Snapshot(); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	e, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	info, err := os.Stat(filepath.Join(dir, "wal.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() == 0 {
+		t.Fatal("wal size = 0, want the log kept")
+	}
+	walSize := info.Size()
+	again, swapped, err := e.CAS("k", "stale", "nope", 5, 1)
+	if err != nil || swapped || again != index {
+		t.Fatalf("CAS retry = (%d, %v, %v), want (%d, false, nil)", again, swapped, err, index)
+	}
+	again, swapped, err = e.CAS("k", "old", "new", 6, 1)
+	if err != nil || !swapped || again != okIndex {
+		t.Fatalf("CAS hit retry = (%d, %v, %v), want (%d, true, nil)", again, swapped, err, okIndex)
+	}
+	if got, ok := e.Get("k"); !ok || got != "new" {
+		t.Fatalf("Get(k) = (%q, %v), want (new, true)", got, ok)
+	}
+	info, err = os.Stat(filepath.Join(dir, "wal.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != walSize {
+		t.Fatalf("wal size after retries = %d, want %d", info.Size(), walSize)
+	}
+	next, err := e.Put("k", "later", 4, 2)
+	if err != nil || next != 4 {
+		t.Fatalf("next put = (%d, %v), want (4, nil)", next, err)
+	}
+}
+
+func TestEngineOpenAppliesTailPastSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	e, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.SetSnapshotEvery(0)
+	const id = uint64(4)
+	idx1, err := e.Put("k", "v1", id, 1)
+	if err != nil || idx1 != 1 {
+		t.Fatalf("first = (%d, %v)", idx1, err)
+	}
+	idx2, err := e.Put("k", "v2", id, 2)
+	if err != nil || idx2 != 2 {
+		t.Fatalf("second = (%d, %v)", idx2, err)
+	}
+	if err := e.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(filepath.Join(dir, "wal.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := snapshot.Save(dir, snapshot.Snapshot{
+		Index: idx1,
+		Data:  map[string]string{"k": "v1"},
+		Sessions: map[uint64]snapshot.Session{
+			id: {Seq: 1, Index: idx1},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	e, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	if got, ok := e.Get("k"); !ok || got != "v2" {
+		t.Fatalf("Get(k) = (%q, %v), want (v2, true)", got, ok)
+	}
+	after, err := os.Stat(filepath.Join(dir, "wal.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Size() != before.Size() {
+		t.Fatalf("wal size = %d, want %d", after.Size(), before.Size())
+	}
+	again, err := e.Put("k", "ignored", id, 2)
+	if err != nil || again != idx2 {
+		t.Fatalf("retry = (%d, %v), want (%d, nil)", again, err, idx2)
+	}
+	next, err := e.Put("k", "v3", id, 3)
+	if err != nil || next != 3 {
+		t.Fatalf("next = (%d, %v), want (3, nil)", next, err)
+	}
+}
+
+func TestEngineOpenSkipsPrefixCoveredBySnapshot(t *testing.T) {
+	dir := t.TempDir()
+	e, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.SetSnapshotEvery(0)
+	const id = uint64(4)
+	if _, err := e.Put("k", "v1", id, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Put("k", "v2", id, 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshot.Save(dir, snapshot.Snapshot{
+		Index: 2,
+		Data:  map[string]string{"k": "v2"},
+		Sessions: map[uint64]snapshot.Session{
+			id: {Seq: 2, Index: 2},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	e, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	if got, ok := e.Get("k"); !ok || got != "v2" {
+		t.Fatalf("Get(k) = (%q, %v), want (v2, true)", got, ok)
+	}
+	info, err := os.Stat(filepath.Join(dir, "wal.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() == 0 {
+		t.Fatal("wal size = 0, want the log kept")
+	}
+	again, err := e.Put("k", "ignored", id, 2)
+	if err != nil || again != 2 {
+		t.Fatalf("retry = (%d, %v), want (2, nil)", again, err)
+	}
+}
+
+func TestEngineSnapshotEvery(t *testing.T) {
+	dir := t.TempDir()
+	e, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	e.SetSnapshotEvery(2)
+
+	if _, err := e.Put("a", "1", 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Put("b", "2", 2, 1); err != nil {
+		t.Fatal(err)
+	}
+	// The snapshot runs after the ack, so a later command waits until it finishes.
+	if _, err := e.Put("a", "1", 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(dir, "wal.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() == 0 {
+		t.Fatal("wal size after first snapshot = 0, want the log kept")
+	}
+	firstSize := info.Size()
+	if e.SnapshotIndex() != 2 {
+		t.Fatalf("snapshot index = %d, want 2", e.SnapshotIndex())
+	}
+
+	if _, err := e.Put("c", "3", 3, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Put("d", "4", 4, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Put("a", "1", 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	info, err = os.Stat(filepath.Join(dir, "wal.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() <= firstSize {
+		t.Fatalf("wal size after later puts = %d, want above %d", info.Size(), firstSize)
+	}
+	if e.SnapshotIndex() != 4 || e.LastIndex() != 4 {
+		t.Fatalf("indexes = (%d, %d), want (4, 4)", e.SnapshotIndex(), e.LastIndex())
+	}
+	for key, want := range map[string]string{"a": "1", "b": "2", "c": "3", "d": "4"} {
+		got, ok := e.Get(key)
+		if !ok || got != want {
+			t.Fatalf("Get(%s) = (%q, %v), want (%s, true)", key, got, ok, want)
+		}
+	}
+}
+
+func TestEngineSnapshotClosed(t *testing.T) {
+	e, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Snapshot(); err == nil {
+		t.Fatal("Snapshot after Close: err = nil, want error")
+	}
+}
+
+func TestEngineCorruptSnapshotFailsOpen(t *testing.T) {
+	dir := t.TempDir()
+	e, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.SetSnapshotEvery(0)
+	if _, err := put1(e, "k", "v"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "snapshot"), []byte("not a snapshot"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(dir); err == nil {
+		t.Fatal("Open corrupt snapshot: err = nil, want error")
 	}
 }

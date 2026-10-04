@@ -16,9 +16,18 @@ type WAL struct {
 	f         *os.File
 	syncFn    func() error
 	lastIndex uint64
+	baseIndex uint64
 }
 
 func Open(dir string, apply func(Record) error) (*WAL, error) {
+	return open(dir, 0, apply)
+}
+
+func OpenAfter(dir string, baseIndex uint64, apply func(Record) error) (*WAL, error) {
+	return open(dir, baseIndex, apply)
+}
+
+func open(dir string, baseIndex uint64, apply func(Record) error) (*WAL, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("wal: mkdir: %w", err)
 	}
@@ -40,7 +49,7 @@ func Open(dir string, apply func(Record) error) (*WAL, error) {
 		}
 	}
 
-	w := &WAL{path: path, f: f}
+	w := &WAL{path: path, f: f, baseIndex: baseIndex}
 
 	if _, err := w.recover(apply); err != nil {
 		_ = f.Close()
@@ -188,7 +197,7 @@ func (w *WAL) recover(apply func(Record) error) (int64, error) {
 			return lastGood, fmt.Errorf("wal: corrupt record at offset %d: index %d, want %d", offset, rec.Index, lastIndex+1)
 		}
 
-		if apply != nil {
+		if apply != nil && rec.Index > w.baseIndex {
 			if err := apply(rec); err != nil {
 				return lastGood, err
 			}
@@ -198,6 +207,9 @@ func (w *WAL) recover(apply func(Record) error) (int64, error) {
 		lastGood = offset + int64(len(frame))
 	}
 
+	if lastIndex < w.baseIndex {
+		return lastGood, fmt.Errorf("wal: log ends at %d, snapshot is %d", lastIndex, w.baseIndex)
+	}
 	if err := w.truncate(lastGood); err != nil {
 		return lastGood, err
 	}

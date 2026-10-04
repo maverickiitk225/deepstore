@@ -1,12 +1,12 @@
 # Node
 
-`deepstore serve` opens the engine and serves HTTP until SIGINT or SIGTERM. Shutdown stops accepting, finishes in-flight requests, and closes the WAL. Flags and routes are in [cmd/README.md](../cmd/README.md). Record layout, `Sync`, and replay are in [durability.md](durability.md).
+`deepstore serve` opens the engine and serves HTTP until SIGINT or SIGTERM. Shutdown stops accepting, finishes in-flight requests, and closes the WAL. Flags and routes are in [cmd/README.md](../cmd/README.md). Record layout, `Sync`, and replay are in [durability.md](durability.md). Snapshots and log compaction are in [snapshot.md](snapshot.md).
 
 `put`, `get`, `delete`, and `cas` are clients of that server. `internal/client` uses one random non-zero client id per process. `NextSeq` is the next sequence. `PutSeq`, `DeleteSeq`, and `CASSeq` send a chosen sequence. The CLI sends sequence 1.
 
 ## Indexes
 
-`lastIndex` is the last record in the log. `appliedIndex` is the last command applied to the map. They are equal after every successful write and after replay.
+`lastIndex` is the last record in the log. `appliedIndex` is the last command applied to the map. They are equal after every successful write and after replay. `snapshotIndex` is the applied index stored in `snapshot`. Just after a snapshot the three match. A tail written after that leaves `snapshotIndex` behind the other two. Recovery is in [snapshot.md](snapshot.md).
 
 The writer assigns the index before `AppendMany`. The first record is 1. Each new record is the previous index plus 1. Replay rejects a gap or a repeat.
 

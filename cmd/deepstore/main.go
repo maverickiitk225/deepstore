@@ -44,8 +44,9 @@ func serve(args []string) int {
 	fs.SetOutput(os.Stderr)
 	dataDir := fs.String("data-dir", "", "directory where wal.log is stored")
 	listen := fs.String("listen", ":7000", "address to listen on")
+	every := fs.Uint64("snapshot-every", engine.DefaultSnapshotEvery, "applied records between snapshots (0 disables)")
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: deepstore serve -data-dir DIR [-listen ADDR]\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: deepstore serve -data-dir DIR [-listen ADDR] [-snapshot-every N]\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -62,6 +63,7 @@ func serve(args []string) int {
 		fmt.Fprintf(os.Stderr, "open: %v\n", err)
 		return 1
 	}
+	e.SetSnapshotEvery(*every)
 
 	srv := server.New(e, *listen)
 	errCh := make(chan error, 1)
@@ -197,7 +199,7 @@ func clientFlags(name string) (*flag.FlagSet, *string) {
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `Usage:
-  deepstore serve -data-dir DIR [-listen ADDR]
+  deepstore serve -data-dir DIR [-listen ADDR] [-snapshot-every N]
   deepstore put [-addr URL] KEY VALUE
   deepstore get [-addr URL] KEY
   deepstore delete [-addr URL] KEY

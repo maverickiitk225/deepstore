@@ -431,6 +431,88 @@ func TestReplayRejectsUnknownVersion(t *testing.T) {
 	expectReplayRejected(t, dir)
 }
 
+func TestWALOpenAfterSkipsCoveredPrefix(t *testing.T) {
+	dir := t.TempDir()
+	w, err := Open(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recs := []Record{
+		{Index: 1, OpType: OpTypePut, Key: "a", Value: "1"},
+		{Index: 2, OpType: OpTypePut, Key: "b", Value: "2"},
+		{Index: 3, OpType: OpTypePut, Key: "c", Value: "3"},
+	}
+	if err := w.AppendMany(recs); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var got []Record
+	w, err = OpenAfter(dir, 2, func(r Record) error {
+		got = append(got, r)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Index != 3 || got[0].Key != "c" {
+		t.Fatalf("replay = %+v, want record 3", got)
+	}
+	if w.LastIndex() != 3 {
+		t.Fatalf("LastIndex = %d, want 3", w.LastIndex())
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWALOpenAfterRejectsLogBehindSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	w, err := Open(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Append(Record{Index: 1, OpType: OpTypePut, Key: "a", Value: "1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(dir, walFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := info.Size()
+
+	if _, err := OpenAfter(dir, 5, func(Record) error { return nil }); err == nil {
+		t.Fatal("OpenAfter log behind snapshot: err = nil, want error")
+	}
+	info, err = os.Stat(filepath.Join(dir, walFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != before {
+		t.Fatalf("wal size = %d, want %d", info.Size(), before)
+	}
+}
+
+func TestWALOpenAfterRejectsGap(t *testing.T) {
+	dir := t.TempDir()
+	w, err := Open(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	appendEncoded(t, dir, Record{Index: 4, OpType: OpTypePut, Key: "a", Value: "1"})
+	if _, err := OpenAfter(dir, 2, func(Record) error { return nil }); err == nil {
+		t.Fatal("OpenAfter gap: err = nil, want error")
+	}
+}
+
 func appendEncoded(t *testing.T, dir string, recs ...Record) {
 	t.Helper()
 	path := filepath.Join(dir, walFileName)

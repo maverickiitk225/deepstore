@@ -31,7 +31,7 @@ If `Sync` fails, nothing in that batch is applied. Later writes fail until the p
 
 ## Recovery
 
-Each record is a CRC32, a length, and a versioned payload: index, operation, key, value, and for compare-and-swap the expected value. Indices start at 1 and increase by one. On open, the log is replayed onto an empty map.
+Each record is a CRC32, a length, and a versioned payload: index, operation, key, value, and for compare-and-swap the expected value. Indices start at 1 and increase by one. On open, a `snapshot` is loaded when one exists, and the log is replayed after that index. With no snapshot, replay starts from an empty map.
 
 A torn tail is truncated back to the last good record. That is a short read at the end of the file, or a bad checksum with no valid record after it. A bad checksum followed by a valid record, an index gap or repeat, an unknown version, or a length past the maximum is corruption, and open fails.
 
@@ -45,12 +45,16 @@ The log index and the applied index are equal after every acknowledgement. Concu
 | --- | --- |
 | `internal/store` | In-memory map. Applies one record. No disk. |
 | `internal/wal` | Append-only file, checksums, `Sync`, replay. |
+| `internal/snapshot` | Checksummed checkpoint of the map and sessions. |
 | `internal/engine` | Queues writes, group-commits, applies, then acks. |
 | `internal/server` | HTTP API over the engine. |
 | `cmd/deepstore` | `serve`, plus a small client. |
 
-Snapshots and more than one node are still ahead.
+After 1024 applied records, the process writes `snapshot` and drops the log prefix it covers. `serve -snapshot-every 0` leaves the log whole. The byte layout and the compaction rules are in [docs/snapshot.md](docs/snapshot.md).
+
+More than one node is still ahead.
 
 - [docs/durability.md](docs/durability.md) — durable log, replay, and what an ack means
+- [docs/snapshot.md](docs/snapshot.md) — snapshot file, log compaction, and recovery
 - [docs/node.md](docs/node.md) — server, sessions, group commit, and the linearizability harness
 - [cmd/README.md](cmd/README.md) — flags and routes

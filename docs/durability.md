@@ -1,6 +1,6 @@
 # Durability
 
-`internal/store` is the in-memory map. `internal/wal` is `wal.log` in the data directory. `internal/engine` appends a record, calls `Sync`, applies the command, then returns. Get reads the map.
+`internal/store` is the in-memory map. `internal/wal` is `wal.log` in the data directory. `internal/snapshot` is `snapshot` in that directory. `internal/engine` appends a record, calls `Sync`, applies the command, then returns. Get reads the map.
 
 ## Record format
 
@@ -39,18 +39,18 @@ Creating `wal.log` is followed by an fsync of the parent directory.
 
 ## Open
 
-`Open` creates the data directory and `wal.log`, or opens the existing file, then reads from offset 0 onto an empty map.
+`Open` creates the data directory and `wal.log`, or opens the existing file, then reads from offset 0. The engine installs `snapshot` first, when that file exists, and does not apply records at or below its index. With no snapshot, replay starts from an empty map.
 
 | Input | Result |
 | --- | --- |
-| Valid CRC, length, version, and `index == previous + 1` | Applied |
+| Valid CRC, length, version, and `index == previous + 1` | Checked. Applied when the index is above the snapshot |
 | Short read at the end of the file | Torn tail. Truncate to the last good offset. |
 | Bad CRC, and no valid record follows | Torn tail. Truncate to the last good offset. |
 | Bad CRC followed by a valid record | Open fails |
 | Index gap or repeated index | Open fails |
 | Unknown version, or length above 16 MiB | Open fails |
 
-A torn tail includes a full length whose payload never landed. After truncation, later appends start at the last good offset. During open, replay is the only update to the map.
+A torn tail includes a full length whose payload never landed. After truncation, later appends start at the last good offset. During open, the map is updated only by installing the snapshot and replaying the log.
 
 ## Acknowledgement
 
@@ -60,10 +60,14 @@ Writes to one key are applied in index order.
 
 A crash before the response leaves the command either in the file or absent. The client retries with the same sequence, described in [node.md](node.md).
 
+## Snapshot
+
+The snapshot file, when it is written, and the log compaction that follows it are in [snapshot.md](snapshot.md).
+
 ## Tests
 
 ```
-go test ./internal/store ./internal/wal ./internal/engine
+go test ./internal/store ./internal/wal ./internal/snapshot ./internal/engine
 ```
 
 | Coverage | Test |
@@ -74,5 +78,6 @@ go test ./internal/store ./internal/wal ./internal/engine
 | Bad CRC before a valid record, oversized length, index gap, repeated index, unknown version | `internal/wal` |
 | Reopen after Put, Delete, and a torn tail | `TestEnginePutGetReopen`, `TestEngineDeleteReopen`, `TestEngineTornTailAfterReopen` |
 | Failed `Sync` poisons the process; reopen replays the bytes in the file | `TestEngineSyncFailurePoisons` |
+| Snapshot file, compaction, and recovery | [snapshot.md](snapshot.md) |
 
 To check a crash by hand: `serve` a data directory, `put` a key, `kill -9` the server, `serve` the same directory, `get` the key.

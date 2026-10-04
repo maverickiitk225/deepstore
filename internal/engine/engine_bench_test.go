@@ -19,6 +19,7 @@ func BenchmarkPutConcurrent(b *testing.B) {
 				b.Fatal(err)
 			}
 			defer e.Close()
+			e.SetSnapshotEvery(0)
 
 			var next atomic.Int64
 			lat := make([][]time.Duration, c)

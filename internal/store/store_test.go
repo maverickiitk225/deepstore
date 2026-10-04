@@ -3,6 +3,8 @@ package store
 import (
 	"sync"
 	"testing"
+
+	"github.com/deepanker/deepstore/internal/snapshot"
 )
 
 func TestApplySetAndGet(t *testing.T) {
@@ -192,6 +194,49 @@ func TestApplySession(t *testing.T) {
 	}
 	if got, ok := sm.Get("k"); !ok || got != "nope" {
 		t.Fatalf("Get = (%q, %v), want (nope, true)", got, ok)
+	}
+}
+
+func TestExportRestore(t *testing.T) {
+	sm := NewStateMachine()
+	if _, err := sm.Apply(Command{Type: CommandTypePut, Key: "k", Value: "v", ClientID: 4, Seq: 1, Index: 3}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := sm.Apply(Command{Type: CommandTypeCAS, Key: "k", Expected: "v", Value: "n", ClientID: 4, Seq: 2, Index: 4})
+	if err != nil || !res.Swapped {
+		t.Fatalf("CAS = (%+v, %v)", res, err)
+	}
+	if _, err := sm.Apply(Command{Type: CommandTypePut, Key: "empty", Value: "", ClientID: 5, Seq: 1, Index: 5}); err != nil {
+		t.Fatal(err)
+	}
+
+	data, sessions := sm.Export()
+	data["extra"] = "x"
+	if _, ok := sm.Get("extra"); ok {
+		t.Fatal("export aliased the map")
+	}
+
+	snapSessions := make(map[uint64]snapshot.Session, len(sessions))
+	for id, sess := range sessions {
+		snapSessions[id] = snapshot.Session{Seq: sess.Seq, Index: sess.Index, Swapped: sess.Swapped}
+	}
+	restored := NewStateMachine()
+	restored.Restore(snapshot.Snapshot{Index: 5, Data: data, Sessions: snapSessions})
+	if got, ok := restored.Get("k"); !ok || got != "n" {
+		t.Fatalf("Get(k) = (%q, %v), want (n, true)", got, ok)
+	}
+	if got, ok := restored.Get("empty"); !ok || got != "" {
+		t.Fatalf("Get(empty) = (%q, %v), want (\"\", true)", got, ok)
+	}
+	res, err = restored.Apply(Command{Type: CommandTypePut, Key: "k", Value: "other", ClientID: 4, Seq: 2, Index: 9})
+	if err != nil || res.Index != 4 || !res.Swapped {
+		t.Fatalf("retry = (%+v, %v), want index 4 swapped", res, err)
+	}
+	if _, err := restored.Apply(Command{Type: CommandTypePut, Key: "k", Value: "next", ClientID: 4, Seq: 3, Index: 6}); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := sm.Get("k"); !ok || got != "n" {
+		t.Fatalf("original Get(k) = (%q, %v), want (n, true)", got, ok)
 	}
 }
 

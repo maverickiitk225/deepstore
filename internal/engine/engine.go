@@ -5,22 +5,30 @@ import (
 	"sync"
 
 	"github.com/deepanker/deepstore/internal/errs"
+	"github.com/deepanker/deepstore/internal/snapshot"
 	"github.com/deepanker/deepstore/internal/store"
 	"github.com/deepanker/deepstore/internal/wal"
 )
 
+// DefaultSnapshotEvery is the number of applied records between snapshots.
+const DefaultSnapshotEvery uint64 = 1024
+
 type Engine struct {
-	wal          *wal.WAL
-	sm           *store.StateMachine
-	mu           sync.Mutex
-	cond         *sync.Cond
-	queue        []commitReq
-	done         chan struct{}
-	holdBatch    bool // tests set this so the writer waits until the queue is full
-	closed       bool
-	poisoned     error
-	lastIndex    uint64
-	appliedIndex uint64
+	dir           string
+	wal           *wal.WAL
+	sm            *store.StateMachine
+	mu            sync.Mutex
+	cond          *sync.Cond
+	queue         []commitReq
+	snapWait      []chan error
+	done          chan struct{}
+	holdBatch     bool // tests set this so the writer waits until the queue is full
+	closed        bool
+	poisoned      error
+	lastIndex     uint64
+	appliedIndex  uint64
+	snapshotEvery uint64
+	snapshotIndex uint64
 }
 
 type commitReq struct {
@@ -36,8 +44,21 @@ type commitResp struct {
 }
 
 func Open(dir string) (*Engine, error) {
+	return open(dir, DefaultSnapshotEvery)
+}
+
+func open(dir string, every uint64) (*Engine, error) {
 	sm := store.NewStateMachine()
-	w, err := wal.Open(dir, func(r wal.Record) error {
+	snap, ok, err := snapshot.Load(dir)
+	if err != nil {
+		return nil, err
+	}
+	var base uint64
+	if ok {
+		base = snap.Index
+		sm.Restore(snap)
+	}
+	w, err := wal.OpenAfter(dir, base, func(r wal.Record) error {
 		cmd, err := recordToCommand(r)
 		if err != nil {
 			return err
@@ -49,11 +70,14 @@ func Open(dir string) (*Engine, error) {
 		return nil, err
 	}
 	e := &Engine{
-		wal:          w,
-		sm:           sm,
-		done:         make(chan struct{}),
-		lastIndex:    w.LastIndex(),
-		appliedIndex: w.LastIndex(),
+		dir:           dir,
+		wal:           w,
+		sm:            sm,
+		done:          make(chan struct{}),
+		lastIndex:     w.LastIndex(),
+		appliedIndex:  w.LastIndex(),
+		snapshotEvery: every,
+		snapshotIndex: base,
 	}
 	e.cond = sync.NewCond(&e.mu)
 	go e.writer()
@@ -103,6 +127,25 @@ func (e *Engine) CAS(key, expected, value string, clientID, seq uint64) (uint64,
 	})
 }
 
+func (e *Engine) Snapshot() error {
+	resp := make(chan error, 1)
+	e.mu.Lock()
+	if err := e.errIfNotWritable(); err != nil {
+		e.mu.Unlock()
+		return err
+	}
+	e.snapWait = append(e.snapWait, resp)
+	e.cond.Signal()
+	e.mu.Unlock()
+	return <-resp
+}
+
+func (e *Engine) SetSnapshotEvery(n uint64) {
+	e.mu.Lock()
+	e.snapshotEvery = n
+	e.mu.Unlock()
+}
+
 func requireSession(clientID, seq uint64) error {
 	if clientID == 0 || seq == 0 {
 		return fmt.Errorf("engine: %w: client id and seq are required", errs.ErrSession)
@@ -136,19 +179,82 @@ func (e *Engine) writer() {
 		for e.holdBatch && !e.closed {
 			e.cond.Wait()
 		}
-		for len(e.queue) == 0 && !e.closed {
+		for len(e.queue) == 0 && len(e.snapWait) == 0 && !e.closed {
 			e.cond.Wait()
 		}
-		if len(e.queue) == 0 {
+		if len(e.queue) > 0 {
+			batch := e.queue
+			e.queue = nil
 			e.mu.Unlock()
-			return
+			e.commitBatch(batch)
+			e.maybeSnapshot()
+			e.mu.Lock()
+			continue
 		}
-		batch := e.queue
-		e.queue = nil
+		if len(e.snapWait) > 0 && !e.closed {
+			waiters := e.snapWait
+			e.snapWait = nil
+			e.mu.Unlock()
+			err := e.installSnapshot()
+			for _, ch := range waiters {
+				ch <- err
+			}
+			e.mu.Lock()
+			continue
+		}
+		for _, ch := range e.snapWait {
+			ch <- fmt.Errorf("engine: closed")
+		}
+		e.snapWait = nil
 		e.mu.Unlock()
-		e.commitBatch(batch)
-		e.mu.Lock()
+		return
 	}
+}
+
+func (e *Engine) maybeSnapshot() {
+	e.mu.Lock()
+	every := e.snapshotEvery
+	due := every > 0 && e.poisoned == nil && e.appliedIndex > e.snapshotIndex && e.appliedIndex-e.snapshotIndex >= every
+	e.mu.Unlock()
+	if !due {
+		return
+	}
+	_ = e.installSnapshot()
+}
+
+func (e *Engine) installSnapshot() error {
+	e.mu.Lock()
+	if e.poisoned != nil {
+		err := fmt.Errorf("engine: poisoned: %w", e.poisoned)
+		e.mu.Unlock()
+		return err
+	}
+	if e.wal == nil {
+		e.mu.Unlock()
+		return fmt.Errorf("engine: closed")
+	}
+	index := e.appliedIndex
+	if index <= e.snapshotIndex {
+		e.mu.Unlock()
+		return nil
+	}
+	data, sessions := e.sm.Export()
+	dir := e.dir
+	e.mu.Unlock()
+
+	snapSessions := make(map[uint64]snapshot.Session, len(sessions))
+	for id, sess := range sessions {
+		snapSessions[id] = snapshot.Session{Seq: sess.Seq, Index: sess.Index, Swapped: sess.Swapped}
+	}
+	if err := snapshot.Save(dir, snapshot.Snapshot{Index: index, Data: data, Sessions: snapSessions}); err != nil {
+		return fmt.Errorf("engine: snapshot: %w", err)
+	}
+	e.mu.Lock()
+	if index > e.snapshotIndex {
+		e.snapshotIndex = index
+	}
+	e.mu.Unlock()
+	return nil
 }
 
 func (e *Engine) commitBatch(batch []commitReq) {
@@ -263,6 +369,12 @@ func (e *Engine) AppliedIndex() uint64 {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.appliedIndex
+}
+
+func (e *Engine) SnapshotIndex() uint64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.snapshotIndex
 }
 
 func (e *Engine) errIfNotWritable() error {

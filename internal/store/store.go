@@ -2,7 +2,10 @@ package store
 
 import (
 	"fmt"
+	"maps"
 	"sync"
+
+	"github.com/deepanker/deepstore/internal/snapshot"
 )
 
 type CommandType string
@@ -99,11 +102,7 @@ func checkSeq(cmd Command, prev Session) error {
 func (s *StateMachine) Sessions() map[uint64]Session {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := make(map[uint64]Session, len(s.sessions))
-	for id, sess := range s.sessions {
-		out[id] = sess
-	}
-	return out
+	return maps.Clone(s.sessions)
 }
 
 func (s *StateMachine) Get(key string) (string, bool) {
@@ -112,4 +111,20 @@ func (s *StateMachine) Get(key string) (string, bool) {
 
 	value, ok := s.data[key]
 	return value, ok
+}
+
+func (s *StateMachine) Export() (map[string]string, map[uint64]Session) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return maps.Clone(s.data), maps.Clone(s.sessions)
+}
+
+func (s *StateMachine) Restore(snap snapshot.Snapshot) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data = maps.Clone(snap.Data)
+	s.sessions = make(map[uint64]Session, len(snap.Sessions))
+	for id, sess := range snap.Sessions {
+		s.sessions[id] = Session(sess)
+	}
 }
