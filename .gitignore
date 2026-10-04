@@ -33,3 +33,6 @@ go.work.sum
 .cursor/
 # .idea/
 # .vscode/
+
+# Local planning notes
+/PROJECT_PLAN.md
