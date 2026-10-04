@@ -466,9 +466,50 @@ func TestWALOpenAfterSkipsCoveredPrefix(t *testing.T) {
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
+
+	got = nil
+	w, err = OpenAfter(dir, 2, func(r Record) error {
+		got = append(got, r)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	if len(got) != 1 || got[0].Index != 3 {
+		t.Fatalf("replay after compact = %+v, want record 3", got)
+	}
 }
 
-func TestWALOpenAfterRejectsLogBehindSnapshot(t *testing.T) {
+func TestWALOpenAfterEmptyKeepsBase(t *testing.T) {
+	dir := t.TempDir()
+	w, err := Open(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	w, err = OpenAfter(dir, 5, func(Record) error {
+		t.Fatal("apply on empty log")
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.LastIndex() != 5 {
+		t.Fatalf("LastIndex = %d, want 5", w.LastIndex())
+	}
+	if err := w.Append(Record{Index: 6, OpType: OpTypePut, Key: "a", Value: "1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWALOpenAfterTruncatesWhenBehindSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	w, err := Open(dir, nil)
 	if err != nil {
@@ -480,21 +521,139 @@ func TestWALOpenAfterRejectsLogBehindSnapshot(t *testing.T) {
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
+
+	var applied int
+	w, err = OpenAfter(dir, 5, func(Record) error {
+		applied++
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied != 0 {
+		t.Fatalf("applied = %d, want 0", applied)
+	}
+	if w.LastIndex() != 5 {
+		t.Fatalf("LastIndex = %d, want 5", w.LastIndex())
+	}
 	info, err := os.Stat(filepath.Join(dir, walFileName))
 	if err != nil {
 		t.Fatal(err)
 	}
-	before := info.Size()
-
-	if _, err := OpenAfter(dir, 5, func(Record) error { return nil }); err == nil {
-		t.Fatal("OpenAfter log behind snapshot: err = nil, want error")
+	if info.Size() != 0 {
+		t.Fatalf("wal size = %d, want 0", info.Size())
 	}
-	info, err = os.Stat(filepath.Join(dir, walFileName))
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWALDiscardThroughKeepsTail(t *testing.T) {
+	dir := t.TempDir()
+	w, err := Open(dir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Size() != before {
-		t.Fatalf("wal size = %d, want %d", info.Size(), before)
+	if err := w.AppendMany([]Record{
+		{Index: 1, OpType: OpTypePut, Key: "a", Value: "1"},
+		{Index: 2, OpType: OpTypePut, Key: "b", Value: "2"},
+		{Index: 3, OpType: OpTypePut, Key: "c", Value: "3"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.DiscardThrough(2); err != nil {
+		t.Fatal(err)
+	}
+	if w.LastIndex() != 3 {
+		t.Fatalf("LastIndex = %d, want 3", w.LastIndex())
+	}
+	if err := w.Append(Record{Index: 4, OpType: OpTypePut, Key: "d", Value: "4"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var got []Record
+	w, err = OpenAfter(dir, 2, func(r Record) error {
+		got = append(got, r)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	if len(got) != 2 || got[0].Index != 3 || got[1].Index != 4 {
+		t.Fatalf("replay = %+v, want records 3 and 4", got)
+	}
+}
+
+func TestWALDiscardThroughTwice(t *testing.T) {
+	dir := t.TempDir()
+	w, err := Open(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.AppendMany([]Record{
+		{Index: 1, OpType: OpTypePut, Key: "a", Value: "1"},
+		{Index: 2, OpType: OpTypePut, Key: "b", Value: "2"},
+		{Index: 3, OpType: OpTypePut, Key: "c", Value: "3"},
+		{Index: 4, OpType: OpTypePut, Key: "d", Value: "4"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.DiscardThrough(2); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.DiscardThrough(3); err != nil {
+		t.Fatal(err)
+	}
+	if w.LastIndex() != 4 {
+		t.Fatalf("LastIndex = %d, want 4", w.LastIndex())
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var got []Record
+	w, err = OpenAfter(dir, 3, func(r Record) error {
+		got = append(got, r)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	if len(got) != 1 || got[0].Index != 4 {
+		t.Fatalf("replay = %+v, want record 4", got)
+	}
+}
+
+func TestWALDiscardThroughZeroLeavesFile(t *testing.T) {
+	dir := t.TempDir()
+	w, err := Open(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Append(Record{Index: 1, OpType: OpTypePut, Key: "a", Value: "1"}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(dir, walFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.DiscardThrough(0); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(filepath.Join(dir, walFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Size() != info.Size() {
+		t.Fatalf("wal size = %d, want %d", after.Size(), info.Size())
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

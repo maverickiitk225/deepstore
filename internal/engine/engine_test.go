@@ -1001,23 +1001,18 @@ func TestEngineSnapshotReopen(t *testing.T) {
 	if _, err := del1(e, "gone"); err != nil {
 		t.Fatal(err)
 	}
-	info, err := os.Stat(filepath.Join(dir, "wal.log"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	before := info.Size()
 	if err := e.Snapshot(); err != nil {
 		t.Fatal(err)
 	}
 	if e.SnapshotIndex() != 4 || e.LastIndex() != 4 || e.AppliedIndex() != 4 {
 		t.Fatalf("indexes = (%d, %d, %d), want (4, 4, 4)", e.SnapshotIndex(), e.LastIndex(), e.AppliedIndex())
 	}
-	info, err = os.Stat(filepath.Join(dir, "wal.log"))
+	info, err := os.Stat(filepath.Join(dir, "wal.log"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Size() != before {
-		t.Fatalf("wal size = %d, want %d", info.Size(), before)
+	if info.Size() != 0 {
+		t.Fatalf("wal size = %d, want 0", info.Size())
 	}
 
 	index, err := put1(e, "tail", "yes")
@@ -1091,10 +1086,9 @@ func TestEngineSnapshotSessionAndCAS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Size() == 0 {
-		t.Fatal("wal size = 0, want the log kept")
+	if info.Size() != 0 {
+		t.Fatalf("wal size = %d, want 0", info.Size())
 	}
-	walSize := info.Size()
 	again, swapped, err := e.CAS("k", "stale", "nope", 5, 1)
 	if err != nil || swapped || again != index {
 		t.Fatalf("CAS retry = (%d, %v, %v), want (%d, false, nil)", again, swapped, err, index)
@@ -1110,8 +1104,8 @@ func TestEngineSnapshotSessionAndCAS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Size() != walSize {
-		t.Fatalf("wal size after retries = %d, want %d", info.Size(), walSize)
+	if info.Size() != 0 {
+		t.Fatalf("wal size after retries = %d, want 0", info.Size())
 	}
 	next, err := e.Put("k", "later", 4, 2)
 	if err != nil || next != 4 {
@@ -1165,8 +1159,8 @@ func TestEngineOpenAppliesTailPastSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.Size() != before.Size() {
-		t.Fatalf("wal size = %d, want %d", after.Size(), before.Size())
+	if after.Size() == 0 || after.Size() >= before.Size() {
+		t.Fatalf("wal size = %d, want the tail only (before %d)", after.Size(), before.Size())
 	}
 	again, err := e.Put("k", "ignored", id, 2)
 	if err != nil || again != idx2 {
@@ -1217,8 +1211,8 @@ func TestEngineOpenSkipsPrefixCoveredBySnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Size() == 0 {
-		t.Fatal("wal size = 0, want the log kept")
+	if info.Size() != 0 {
+		t.Fatalf("wal size = %d, want 0", info.Size())
 	}
 	again, err := e.Put("k", "ignored", id, 2)
 	if err != nil || again != 2 {
@@ -1249,10 +1243,9 @@ func TestEngineSnapshotEvery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Size() == 0 {
-		t.Fatal("wal size after first snapshot = 0, want the log kept")
+	if info.Size() != 0 {
+		t.Fatalf("wal size after first snapshot = %d, want 0", info.Size())
 	}
-	firstSize := info.Size()
 	if e.SnapshotIndex() != 2 {
 		t.Fatalf("snapshot index = %d, want 2", e.SnapshotIndex())
 	}
@@ -1270,8 +1263,8 @@ func TestEngineSnapshotEvery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Size() <= firstSize {
-		t.Fatalf("wal size after later puts = %d, want above %d", info.Size(), firstSize)
+	if info.Size() != 0 {
+		t.Fatalf("wal size after second snapshot = %d, want 0", info.Size())
 	}
 	if e.SnapshotIndex() != 4 || e.LastIndex() != 4 {
 		t.Fatalf("indexes = (%d, %d), want (4, 4)", e.SnapshotIndex(), e.LastIndex())

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 
@@ -234,26 +235,43 @@ func (e *Engine) installSnapshot() error {
 		return fmt.Errorf("engine: closed")
 	}
 	index := e.appliedIndex
-	if index <= e.snapshotIndex {
+	if index == 0 {
 		e.mu.Unlock()
 		return nil
 	}
-	data, sessions := e.sm.Export()
+	needSave := index > e.snapshotIndex
 	dir := e.dir
+	snapAt := e.snapshotIndex
 	e.mu.Unlock()
 
-	snapSessions := make(map[uint64]snapshot.Session, len(sessions))
-	for id, sess := range sessions {
-		snapSessions[id] = snapshot.Session{Seq: sess.Seq, Index: sess.Index, Swapped: sess.Swapped}
+	if needSave {
+		data, sessions := e.sm.Export()
+		snapSessions := make(map[uint64]snapshot.Session, len(sessions))
+		for id, sess := range sessions {
+			snapSessions[id] = snapshot.Session{Seq: sess.Seq, Index: sess.Index, Swapped: sess.Swapped}
+		}
+		if err := snapshot.Save(dir, snapshot.Snapshot{Index: index, Data: data, Sessions: snapSessions}); err != nil {
+			return fmt.Errorf("engine: snapshot: %w", err)
+		}
+		e.mu.Lock()
+		if index > e.snapshotIndex {
+			e.snapshotIndex = index
+		}
+		e.mu.Unlock()
+		snapAt = index
 	}
-	if err := snapshot.Save(dir, snapshot.Snapshot{Index: index, Data: data, Sessions: snapSessions}); err != nil {
+	return e.compactLog(snapAt)
+}
+
+func (e *Engine) compactLog(index uint64) error {
+	if err := e.wal.DiscardThrough(index); err != nil {
+		e.mu.Lock()
+		if errors.Is(err, errs.ErrUnavailable) {
+			e.poisoned = err
+		}
+		e.mu.Unlock()
 		return fmt.Errorf("engine: snapshot: %w", err)
 	}
-	e.mu.Lock()
-	if index > e.snapshotIndex {
-		e.snapshotIndex = index
-	}
-	e.mu.Unlock()
 	return nil
 }
 

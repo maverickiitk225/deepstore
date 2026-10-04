@@ -43,9 +43,6 @@ The bytes go to `snapshot.tmp`, the file is synced, then renamed to `snapshot`, 
 Compaction rewrites `wal.log` so it contains only records with an index above the snapshot. The kept tail is copied into `wal.log.tmp`, that file is synced, the live log is closed, and `wal.log.tmp` is renamed over `wal.log`. The directory is synced, and the new file is opened at its end. `lastIndex` does not change, so the next append is still the last index plus one.
 
 A log that already begins at the snapshot index plus one is left in place. A log whose every record is at or below the snapshot becomes an empty file. The following append still uses `lastIndex + 1`. A later snapshot compacts a log that no longer starts at 1. The first record then has to be at most the new snapshot index plus one, and each record still has to be the previous index plus one.
-
-`index` 0 leaves the file as it is. Open deletes a leftover `wal.log.tmp`. That file is the unpublished rewrite. `wal.log` is still the log.
-
 Compaction uses its own sync of the new file and of the directory. It does not call the batch `Sync`.
 
 If the new log cannot be opened after the old file is closed, the engine is poisoned. Later writes fail until the process exits. The snapshot is already durable, and the next open recovers from it. Any other compaction error leaves the engine writable. The snapshot file is the new one, and the next snapshot tries the drop again.
@@ -77,7 +74,7 @@ The snapshot is published before any byte of the prefix is dropped. Either file 
 | --- | --- | --- |
 | During `snapshot.tmp`, before the rename | Previous `snapshot`, or none, and the full log | Replay from the previous snapshot, or from an empty map. A leftover `snapshot.tmp` is ignored. |
 | After `snapshot` is renamed and the directory is synced, before the log rewrite | New `snapshot`, full log | Install the snapshot, skip records at or below its index, then compact. |
-| During `wal.log.tmp`, before the rename | New `snapshot`, old `wal.log` | Delete `wal.log.tmp`. Same recovery as the row above. |
+| During `wal.log.tmp`, before the rename | New `snapshot`, old `wal.log` | Replay from the snapshot and compact. A leftover `wal.log.tmp` is ignored. |
 | After `wal.log` is renamed | New `snapshot`, log is the tail or empty | Replay the tail onto the snapshot. Compaction finds the prefix already gone. |
 
 A crash before the response still leaves a command either in the log or absent. The snapshot does not include a command that failed `Sync`, because that command was not applied. The client retries with the same sequence, described in [node.md](node.md).
@@ -95,7 +92,7 @@ go test ./internal/snapshot ./internal/wal ./internal/engine
 | Coverage | Test |
 | --- | --- |
 | Round trip, byte-stable encoding, torn file, bad CRC, unknown version, session past the snapshot | `internal/snapshot` |
-| Replay skips a covered prefix; a log that ends below the snapshot truncates | `TestWALOpenAfterSkipsCoveredPrefix`, `TestWALOpenAfterEmptyKeepsBase` |
+| Replay skips a covered prefix; a log that ends below the snapshot truncates | `TestWALOpenAfterSkipsCoveredPrefix`, `TestWALOpenAfterEmptyKeepsBase`, `TestWALOpenAfterTruncatesWhenBehindSnapshot` |
 | A suffix that starts past the snapshot index plus one fails open | `TestWALOpenAfterRejectsGap` |
 | Dropping a prefix keeps the tail, including a second drop over a compacted log | `TestWALDiscardThroughKeepsTail`, `TestWALDiscardThroughTwice` |
 | Snapshot, reopen, an empty value, a deleted key, and a tail record | `TestEngineSnapshotReopen` |

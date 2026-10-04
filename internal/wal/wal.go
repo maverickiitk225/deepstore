@@ -7,9 +7,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/deepanker/deepstore/internal/errs"
 )
 
-const walFileName = "wal.log"
+const (
+	walFileName = "wal.log"
+	tmpFileName = "wal.log.tmp"
+)
 
 type WAL struct {
 	path      string
@@ -53,6 +58,10 @@ func open(dir string, baseIndex uint64, apply func(Record) error) (*WAL, error) 
 
 	if _, err := w.recover(apply); err != nil {
 		_ = f.Close()
+		return nil, err
+	}
+	if err := w.DiscardThrough(baseIndex); err != nil {
+		_ = w.Close()
 		return nil, err
 	}
 	return w, nil
@@ -128,6 +137,155 @@ func (w *WAL) Close() error {
 	return err
 }
 
+func (w *WAL) DiscardThrough(index uint64) error {
+	if w.f == nil {
+		return fmt.Errorf("wal: closed")
+	}
+	if index == 0 {
+		return nil
+	}
+
+	dir := filepath.Dir(w.path)
+	tmp := filepath.Join(dir, tmpFileName)
+	if err := os.Remove(tmp); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("wal: remove tmp: %w", err)
+	}
+
+	tail, err := w.tailOffset(index)
+	if err != nil {
+		return err
+	}
+	if tail == 0 {
+		if _, err := w.f.Seek(0, io.SeekEnd); err != nil {
+			return fmt.Errorf("wal: seek end: %w", err)
+		}
+		return nil
+	}
+
+	if err := w.writeTail(tmp, tail); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+
+	if err := w.f.Close(); err != nil {
+		w.f = nil
+		_ = os.Remove(tmp)
+		if f, oerr := os.OpenFile(w.path, os.O_RDWR, 0o644); oerr == nil {
+			w.f = f
+			_, _ = w.f.Seek(0, io.SeekEnd)
+			return fmt.Errorf("wal: close: %w", err)
+		}
+		return fmt.Errorf("%w: close: %v", errs.ErrUnavailable, err)
+	}
+	w.f = nil
+
+	if err := os.Rename(tmp, w.path); err != nil {
+		_ = os.Remove(tmp)
+		if f, oerr := os.OpenFile(w.path, os.O_RDWR, 0o644); oerr == nil {
+			w.f = f
+			_, _ = w.f.Seek(0, io.SeekEnd)
+			return fmt.Errorf("wal: rename: %w", err)
+		}
+		return fmt.Errorf("%w: rename: %v", errs.ErrUnavailable, err)
+	}
+	if err := syncDir(dir); err != nil {
+		if f, oerr := os.OpenFile(w.path, os.O_RDWR, 0o644); oerr != nil {
+			return fmt.Errorf("%w: %v", errs.ErrUnavailable, oerr)
+		} else {
+			w.f = f
+			_, _ = f.Seek(0, io.SeekEnd)
+		}
+		return err
+	}
+
+	f, err := os.OpenFile(w.path, os.O_RDWR, 0o644)
+	if err != nil {
+		return fmt.Errorf("%w: %w", errs.ErrUnavailable, err)
+	}
+	if _, err := f.Seek(0, io.SeekEnd); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("%w: %w", errs.ErrUnavailable, err)
+	}
+	w.f = f
+	return nil
+}
+
+func (w *WAL) tailOffset(index uint64) (int64, error) {
+	if _, err := w.f.Seek(0, io.SeekStart); err != nil {
+		return 0, fmt.Errorf("wal: seek: %w", err)
+	}
+
+	var tail int64 = -1
+	header := make([]byte, 8)
+	for {
+		offset, err := w.f.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return 0, fmt.Errorf("wal: seek: %w", err)
+		}
+		_, err = io.ReadFull(w.f, header)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return 0, fmt.Errorf("wal: read header: %w", err)
+		}
+		payloadLen := binary.LittleEndian.Uint32(header[4:8])
+		if payloadLen > maxPayloadSize {
+			return 0, fmt.Errorf("wal: corrupt record at offset %d: payload length %d exceeds max %d", offset, payloadLen, maxPayloadSize)
+		}
+		payload := make([]byte, payloadLen)
+		if _, err := io.ReadFull(w.f, payload); err != nil {
+			return 0, fmt.Errorf("wal: read payload: %w", err)
+		}
+		frame := make([]byte, 8+len(payload))
+		copy(frame[:8], header)
+		copy(frame[8:], payload)
+		var rec Record
+		if err := rec.Decode(frame); err != nil {
+			return 0, fmt.Errorf("wal: corrupt record at offset %d: %w", offset, err)
+		}
+		if rec.Index > index {
+			if tail < 0 {
+				if offset == 0 {
+					return 0, nil
+				}
+				tail = offset
+			}
+		}
+	}
+	if tail < 0 {
+		end, err := w.f.Seek(0, io.SeekEnd)
+		if err != nil {
+			return 0, fmt.Errorf("wal: seek end: %w", err)
+		}
+		return end, nil
+	}
+	return tail, nil
+}
+
+func (w *WAL) writeTail(tmp string, tail int64) error {
+	tf, err := os.OpenFile(tmp, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("wal: create tmp: %w", err)
+	}
+	if _, err := w.f.Seek(tail, io.SeekStart); err != nil {
+		_ = tf.Close()
+		return fmt.Errorf("wal: seek: %w", err)
+	}
+	if _, err := io.Copy(tf, w.f); err != nil {
+		_ = tf.Close()
+		return fmt.Errorf("wal: copy tail: %w", err)
+	}
+	if err := tf.Sync(); err != nil {
+		_ = tf.Close()
+		return fmt.Errorf("wal: sync tmp: %w", err)
+	}
+	if err := tf.Close(); err != nil {
+		return fmt.Errorf("wal: close tmp: %w", err)
+	}
+	return nil
+}
+
 func (w *WAL) recover(apply func(Record) error) (int64, error) {
 	if _, err := w.f.Seek(0, io.SeekStart); err != nil {
 		return 0, fmt.Errorf("wal: seek: %w", err)
@@ -193,7 +351,11 @@ func (w *WAL) recover(apply func(Record) error) (int64, error) {
 			}
 			return lastGood, fmt.Errorf("wal: corrupt record at offset %d: %w", offset, err)
 		}
-		if rec.Index != lastIndex+1 {
+		if lastIndex == 0 {
+			if err := checkFirstIndex(rec.Index, w.baseIndex); err != nil {
+				return lastGood, fmt.Errorf("wal: corrupt record at offset %d: %w", offset, err)
+			}
+		} else if rec.Index != lastIndex+1 {
 			return lastGood, fmt.Errorf("wal: corrupt record at offset %d: index %d, want %d", offset, rec.Index, lastIndex+1)
 		}
 
@@ -208,7 +370,11 @@ func (w *WAL) recover(apply func(Record) error) (int64, error) {
 	}
 
 	if lastIndex < w.baseIndex {
-		return lastGood, fmt.Errorf("wal: log ends at %d, snapshot is %d", lastIndex, w.baseIndex)
+		if err := w.truncate(0); err != nil {
+			return lastGood, err
+		}
+		w.lastIndex = w.baseIndex
+		return 0, nil
 	}
 	if err := w.truncate(lastGood); err != nil {
 		return lastGood, err
@@ -218,6 +384,19 @@ func (w *WAL) recover(apply func(Record) error) (int64, error) {
 	}
 	w.lastIndex = lastIndex
 	return lastGood, nil
+}
+
+func checkFirstIndex(index, base uint64) error {
+	if index == 1 {
+		return nil
+	}
+	if base > 0 && index <= base+1 {
+		return nil
+	}
+	if base == 0 {
+		return fmt.Errorf("index %d, want 1", index)
+	}
+	return fmt.Errorf("index %d, want 1 or at most %d", index, base+1)
 }
 
 func (w *WAL) validRecordFollows(start int64) (bool, error) {
