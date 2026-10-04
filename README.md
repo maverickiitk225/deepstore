@@ -37,7 +37,7 @@ A torn tail is truncated back to the last good record. That is a short read at t
 
 Creating `wal.log` is followed by an fsync of the parent directory, so the new directory entry survives a crash too.
 
-The log index and the applied index are equal after every acknowledgement. They are tracked separately because a replicated log will have a commit index between them. Concurrent histories, including ones that kill the server and restart it on the same directory, are checked with [Porcupine](https://github.com/anishathalye/porcupine). A call that timed out or lost its connection is an unknown outcome.
+The log index and the applied index are equal after every acknowledgement. Concurrent histories, including ones that kill the server and restart it on the same directory, are checked with [Porcupine](https://github.com/anishathalye/porcupine). A call that timed out or lost its connection is an unknown outcome.
 
 ## Layout
 
@@ -51,6 +51,6 @@ The log index and the applied index are equal after every acknowledgement. They 
 
 Snapshots and more than one node are still ahead.
 
-- [docs/phase1-engine.md](docs/phase1-engine.md) — record layout, fsync policy, replay rules
-- [docs/phase2-node.md](docs/phase2-node.md) — the node this is growing into
+- [docs/durability.md](docs/durability.md) — durable log, replay, and what an ack means
+- [docs/node.md](docs/node.md) — server, sessions, group commit, and the linearizability harness
 - [cmd/README.md](cmd/README.md) — flags and routes
