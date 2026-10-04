@@ -1,6 +1,6 @@
 # deepstore
 
-A key-value store for learning how a durable, linearizable node works. The end goal is a small distributed system. What runs today is one process: an in-memory map, an append-only log, and an HTTP server.
+A durable, linearizable key-value store. Acknowledged writes stay, retries apply once, and one process serves Put, Get, Delete, and compare-and-swap over HTTP.
 
 ## Run
 
