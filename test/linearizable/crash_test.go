@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -57,7 +58,8 @@ func TestServerPutGetLinearizableUnderCrash(t *testing.T) {
 
 	var proc serverProc
 	t.Cleanup(proc.kill)
-	if err := proc.start(bin, dir, addr); err != nil {
+	const snapshotEvery uint64 = 8
+	if err := proc.start(bin, dir, addr, snapshotEvery); err != nil {
 		t.Fatal(err)
 	}
 
@@ -152,7 +154,7 @@ func TestServerPutGetLinearizableUnderCrash(t *testing.T) {
 		time.Sleep(500 * time.Millisecond)
 		proc.kill()
 		time.Sleep(80 * time.Millisecond)
-		if err := proc.start(bin, dir, addr); err != nil {
+		if err := proc.start(bin, dir, addr, snapshotEvery); err != nil {
 			close(stop)
 			wg.Wait()
 			t.Fatal(err)
@@ -170,6 +172,9 @@ func TestServerPutGetLinearizableUnderCrash(t *testing.T) {
 	}
 	if len(history) == 0 {
 		t.Fatal("no operations recorded")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "snapshot")); err != nil {
+		t.Fatalf("snapshot: %v", err)
 	}
 
 	res, info := porcupine.CheckOperationsVerbose(kvModel(), history, 30*time.Second)
@@ -220,11 +225,11 @@ type serverProc struct {
 	cmd *exec.Cmd
 }
 
-func (p *serverProc) start(bin, dir, addr string) error {
+func (p *serverProc) start(bin, dir, addr string, snapshotEvery uint64) error {
 	p.kill()
 	var last error
 	for i := 0; i < 50; i++ {
-		cmd := exec.Command(bin, "serve", "-data-dir", dir, "-listen", addr)
+		cmd := exec.Command(bin, "serve", "-data-dir", dir, "-listen", addr, "-snapshot-every", strconv.FormatUint(snapshotEvery, 10))
 		cmd.Stdout = io.Discard
 		cmd.Stderr = io.Discard
 		if err := cmd.Start(); err != nil {

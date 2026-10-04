@@ -58,7 +58,7 @@ A `Sync` error replies to the whole batch and poisons the engine. `AppendMany` m
 
 `TestServerPutGetLinearizable` uses 8 clients, 20 operations each, and keys `a` through `e`.
 
-`TestServerPutGetLinearizableUnderCrash` builds `./cmd/deepstore`, uses the same clients and keys, and `kill -9`s the process three times, restarting it on the same directory. A Put that times out or loses its connection is recorded as unknown and retried with the same sequence. The model accepts that write as either applied or absent. A Get that fails because the process is down is retried and left out of the history until it returns.
+`TestServerPutGetLinearizableUnderCrash` builds `./cmd/deepstore`, uses the same clients and keys, and `kill -9`s the process three times, restarting it on the same directory. `serve -snapshot-every 8` writes a snapshot and compacts the log during that run, so a kill can land in either step. The test fails if no `snapshot` file was published. A Put that times out or loses its connection is recorded as unknown and retried with the same sequence. The model accepts that write as either applied or absent. A Get that fails because the process is down is retried and left out of the history until it returns.
 
 The history covers Put and Get. CAS is covered by the engine and server tests.
 
@@ -84,4 +84,4 @@ go test -bench=BenchmarkPutConcurrent -benchtime=1s ./internal/engine
 | Version 2 replay, then a version 3 write | `TestEngineReplaysUnsessionedRecord` |
 | HTTP Put, Get, Delete, and CAS | `internal/server` |
 | Concurrent Put and Get | `TestServerPutGetLinearizable` |
-| The same history across three `kill -9` restarts | `TestServerPutGetLinearizableUnderCrash` |
+| The same history across three `kill -9` restarts, with snapshots and log compaction | `TestServerPutGetLinearizableUnderCrash` |
