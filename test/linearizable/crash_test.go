@@ -57,6 +57,7 @@ func TestServerPutGetLinearizableUnderCrash(t *testing.T) {
 	addr := freeAddr(t)
 
 	var proc serverProc
+	proc.raftAddr = freeAddr(t)
 	t.Cleanup(proc.kill)
 	const snapshotEvery uint64 = 8
 	if err := proc.start(bin, dir, addr, snapshotEvery); err != nil {
@@ -173,8 +174,18 @@ func TestServerPutGetLinearizableUnderCrash(t *testing.T) {
 	if len(history) == 0 {
 		t.Fatal("no operations recorded")
 	}
-	if _, err := os.Stat(filepath.Join(dir, "snapshot")); err != nil {
+	entries, err := os.ReadDir(filepath.Join(dir, "raft-snap", "snapshots"))
+	if err != nil {
 		t.Fatalf("snapshot: %v", err)
+	}
+	var snaps int
+	for _, entry := range entries {
+		if entry.IsDir() {
+			snaps++
+		}
+	}
+	if snaps == 0 {
+		t.Fatal("snapshot: none written")
 	}
 
 	res, info := porcupine.CheckOperationsVerbose(kvModel(), history, 30*time.Second)
@@ -221,15 +232,16 @@ func freeAddr(t *testing.T) string {
 }
 
 type serverProc struct {
-	mu  sync.Mutex
-	cmd *exec.Cmd
+	mu       sync.Mutex
+	cmd      *exec.Cmd
+	raftAddr string
 }
 
 func (p *serverProc) start(bin, dir, addr string, snapshotEvery uint64) error {
 	p.kill()
 	var last error
 	for i := 0; i < 50; i++ {
-		cmd := exec.Command(bin, "serve", "-data-dir", dir, "-listen", addr, "-snapshot-every", strconv.FormatUint(snapshotEvery, 10))
+		cmd := exec.Command(bin, "serve", "-data-dir", dir, "-listen", addr, "-raft-addr", p.raftAddr, "-snapshot-every", strconv.FormatUint(snapshotEvery, 10))
 		cmd.Stdout = io.Discard
 		cmd.Stderr = io.Discard
 		if err := cmd.Start(); err != nil {

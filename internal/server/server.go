@@ -8,19 +8,25 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/deepanker/deepstore/internal/engine"
 	"github.com/deepanker/deepstore/internal/errs"
 )
 
 const maxBody = 16<<20 + 1024
 
-type Server struct {
-	eng  *engine.Engine
-	http *http.Server
+type storage interface {
+	Put(key, value string, clientID, seq uint64) (uint64, error)
+	Delete(key string, clientID, seq uint64) (uint64, error)
+	CAS(key, expected, value string, clientID, seq uint64) (uint64, bool, error)
+	Get(key string) (string, bool, error)
 }
 
-func New(eng *engine.Engine, addr string) *Server {
-	s := &Server{eng: eng}
+type Server struct {
+	store storage
+	http  *http.Server
+}
+
+func New(store storage, addr string) *Server {
+	s := &Server{store: store}
 	mux := http.NewServeMux()
 	mux.HandleFunc("PUT /v1/keys/{key}", s.put)
 	mux.HandleFunc("GET /v1/keys/{key}", s.get)
@@ -65,7 +71,7 @@ func (s *Server) put(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	index, err := s.eng.Put(key, body.Value, body.ClientID, body.Seq)
+	index, err := s.store.Put(key, body.Value, body.ClientID, body.Seq)
 	if err != nil {
 		writeStatus(w, err)
 		return
@@ -76,7 +82,11 @@ func (s *Server) put(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) get(w http.ResponseWriter, r *http.Request) {
-	value, ok := s.eng.Get(r.PathValue("key"))
+	value, ok, err := s.store.Get(r.PathValue("key"))
+	if err != nil {
+		writeStatus(w, err)
+		return
+	}
 	if !ok {
 		writeError(w, http.StatusNotFound, errors.New("not found"))
 		return
@@ -102,7 +112,7 @@ func (s *Server) cas(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	index, swapped, err := s.eng.CAS(key, body.Expected, body.Value, body.ClientID, body.Seq)
+	index, swapped, err := s.store.CAS(key, body.Expected, body.Value, body.ClientID, body.Seq)
 	if err != nil {
 		writeStatus(w, err)
 		return
@@ -126,7 +136,7 @@ func (s *Server) delete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	index, err := s.eng.Delete(r.PathValue("key"), body.ClientID, body.Seq)
+	index, err := s.store.Delete(r.PathValue("key"), body.ClientID, body.Seq)
 	if err != nil {
 		writeStatus(w, err)
 		return
@@ -156,11 +166,14 @@ func requireSession(clientID, seq uint64) error {
 }
 
 func writeStatus(w http.ResponseWriter, err error) {
-	if errors.Is(err, errs.ErrSession) {
+	switch {
+	case errors.Is(err, errs.ErrSession):
 		writeError(w, http.StatusBadRequest, err)
-		return
+	case errors.Is(err, errs.ErrNotLeader):
+		writeError(w, http.StatusServiceUnavailable, err)
+	default:
+		writeError(w, http.StatusInternalServerError, err)
 	}
-	writeError(w, http.StatusInternalServerError, err)
 }
 
 func writeError(w http.ResponseWriter, status int, err error) {

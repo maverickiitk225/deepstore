@@ -79,6 +79,14 @@ func Load(dir string) (Snapshot, bool, error) {
 	return snap, true, nil
 }
 
+func Encode(snap Snapshot) ([]byte, error) {
+	return encode(snap)
+}
+
+func Decode(data []byte) (Snapshot, error) {
+	return decode(data)
+}
+
 func encode(snap Snapshot) ([]byte, error) {
 	if err := validate(snap); err != nil {
 		return nil, err

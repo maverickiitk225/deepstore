@@ -3,14 +3,14 @@
 `cmd/deepstore` is the process you run.
 
 ```
-deepstore serve -data-dir DIR [-listen ADDR] [-snapshot-every N]
+deepstore serve -data-dir DIR [-listen ADDR] [-node-id ID] [-raft-addr IP:PORT] [-snapshot-every N]
 deepstore put [-addr URL] KEY VALUE
 deepstore get [-addr URL] KEY
 deepstore delete [-addr URL] KEY
 deepstore cas [-addr URL] KEY EXPECTED VALUE
 ```
 
-`serve` keeps the HTTP API up until SIGINT or SIGTERM, then stops accepting, finishes in-flight requests, and closes the WAL. `-snapshot-every` is how many applied records sit between snapshots. The default is 1024. `0` does not snapshot on its own. `put`, `get`, `delete`, and `cas` talk to that server. Each process picks its own client id and sends sequence 1. The default address is `http://127.0.0.1:7000`.
+`serve` opens a one-voter Raft node, waits until it is leader, then keeps the HTTP API up until SIGINT or SIGTERM. Shutdown stops accepting, finishes in-flight requests, and shuts Raft down. `-node-id` defaults to `node1` and is fixed for the data directory. `-raft-addr` defaults to `127.0.0.1:7001` and has to include an IP. `-snapshot-every` is how many Raft log entries sit between snapshots. The default is 1024. `0` does not snapshot on its own. `put`, `get`, `delete`, and `cas` talk to that server. Each process picks its own client id and sends sequence 1. The default address is `http://127.0.0.1:7000`.
 
 Routes:
 

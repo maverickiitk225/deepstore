@@ -13,6 +13,13 @@ import (
 	"github.com/deepanker/deepstore/internal/engine"
 )
 
+type engineStore struct{ *engine.Engine }
+
+func (e engineStore) Get(key string) (string, bool, error) {
+	value, ok := e.Engine.Get(key)
+	return value, ok, nil
+}
+
 func TestCASRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	e, err := engine.Open(dir)
@@ -23,7 +30,7 @@ func TestCASRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := New(e, ln.Addr().String())
+	s := New(engineStore{e}, ln.Addr().String())
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- s.Serve(ln)
@@ -89,7 +96,7 @@ func TestSessionRetryAndGap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := New(e, ln.Addr().String())
+	s := New(engineStore{e}, ln.Addr().String())
 	go func() {
 		_ = s.Serve(ln)
 	}()
@@ -134,7 +141,7 @@ func TestPutGetDeleteRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := New(e, ln.Addr().String())
+	s := New(engineStore{e}, ln.Addr().String())
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- s.Serve(ln)

@@ -1,6 +1,8 @@
 # Node
 
-`deepstore serve` opens the engine and serves HTTP until SIGINT or SIGTERM. Shutdown stops accepting, finishes in-flight requests, and closes the WAL. Flags and routes are in [cmd/README.md](../cmd/README.md). Record layout, `Sync`, and replay are in [durability.md](durability.md). Snapshots and log compaction are in [snapshot.md](snapshot.md).
+`deepstore serve` opens a one-voter Raft node (`internal/node`) and serves HTTP until SIGINT or SIGTERM. Shutdown stops accepting, finishes in-flight requests, and shuts Raft down. Flags and routes are in [cmd/README.md](../cmd/README.md).
+
+The sections below describe `internal/engine`, the single-node commit path. `serve` does not call it. Record layout, `Sync`, and replay are in [durability.md](durability.md). Snapshots and log compaction are in [snapshot.md](snapshot.md).
 
 `put`, `get`, `delete`, and `cas` are clients of that server. `internal/client` uses one random non-zero client id per process. `NextSeq` is the next sequence. `PutSeq`, `DeleteSeq`, and `CASSeq` send a chosen sequence. The CLI sends sequence 1.
 
@@ -58,7 +60,7 @@ A `Sync` error replies to the whole batch and poisons the engine. `AppendMany` m
 
 `TestServerPutGetLinearizable` uses 8 clients, 20 operations each, and keys `a` through `e`.
 
-`TestServerPutGetLinearizableUnderCrash` builds `./cmd/deepstore`, uses the same clients and keys, and `kill -9`s the process three times, restarting it on the same directory. `serve -snapshot-every 8` writes a snapshot and compacts the log during that run, so a kill can land in either step. The test fails if no `snapshot` file was published. A Put that times out or loses its connection is recorded as unknown and retried with the same sequence. The model accepts that write as either applied or absent. A Get that fails because the process is down is retried and left out of the history until it returns.
+`TestServerPutGetLinearizableUnderCrash` builds `./cmd/deepstore`, uses the same clients and keys, and `kill -9`s the process three times, restarting it on the same directory. `serve -snapshot-every 8` writes a Raft snapshot during that run. The test fails if `raft-snap/snapshots` has no snapshot directory. A Put that times out or loses its connection is recorded as unknown and retried with the same sequence. The model accepts that write as either applied or absent. A Get that fails because the process is down is retried and left out of the history until it returns.
 
 The history covers Put and Get. CAS is covered by the engine and server tests.
 

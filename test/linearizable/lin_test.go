@@ -18,6 +18,13 @@ import (
 	"github.com/deepanker/deepstore/internal/server"
 )
 
+type engineStore struct{ *engine.Engine }
+
+func (e engineStore) Get(key string) (string, bool, error) {
+	value, ok := e.Engine.Get(key)
+	return value, ok, nil
+}
+
 func TestModelAcceptsPutThenGet(t *testing.T) {
 	history := []porcupine.Operation{
 		{
@@ -72,7 +79,7 @@ func TestServerPutGetLinearizable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := server.New(eng, ln.Addr().String())
+	srv := server.New(engineStore{eng}, ln.Addr().String())
 	serveErr := make(chan error, 1)
 	go func() {
 		serveErr <- srv.Serve(ln)

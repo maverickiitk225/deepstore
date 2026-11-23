@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/deepanker/deepstore/internal/client"
-	"github.com/deepanker/deepstore/internal/engine"
+	"github.com/deepanker/deepstore/internal/node"
 	"github.com/deepanker/deepstore/internal/server"
 )
 
@@ -42,11 +42,13 @@ func main() {
 func serve(args []string) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	dataDir := fs.String("data-dir", "", "directory where wal.log is stored")
+	dataDir := fs.String("data-dir", "", "directory for the raft log and snapshots")
 	listen := fs.String("listen", ":7000", "address to listen on")
-	every := fs.Uint64("snapshot-every", engine.DefaultSnapshotEvery, "applied records between snapshots (0 disables)")
+	nodeID := fs.String("node-id", "node1", "stable raft id for this data directory")
+	raftAddr := fs.String("raft-addr", "127.0.0.1:7001", "raft bind address, including an IP")
+	every := fs.Uint64("snapshot-every", node.DefaultSnapshotThreshold, "raft log entries between snapshots (0 disables)")
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: deepstore serve -data-dir DIR [-listen ADDR] [-snapshot-every N]\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: deepstore serve -data-dir DIR [-listen ADDR] [-node-id ID] [-raft-addr IP:PORT] [-snapshot-every N]\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -58,28 +60,37 @@ func serve(args []string) int {
 		return 2
 	}
 
-	e, err := engine.Open(*dataDir)
+	nd, err := node.Open(node.Config{
+		Dir:               *dataDir,
+		NodeID:            *nodeID,
+		RaftAddr:          *raftAddr,
+		SnapshotThreshold: *every,
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "open: %v\n", err)
 		return 1
 	}
-	e.SetSnapshotEvery(*every)
 
-	srv := server.New(e, *listen)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if err := nd.WaitForLeader(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "leader: %v\n", err)
+		_ = nd.Close()
+		return 1
+	}
+
+	srv := server.New(nd, *listen)
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- srv.ListenAndServe()
 	}()
 	fmt.Fprintf(os.Stderr, "listening on %s\n", *listen)
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
 	select {
 	case err := <-errCh:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			fmt.Fprintf(os.Stderr, "serve: %v\n", err)
-			_ = e.Close()
+			_ = nd.Close()
 			return 1
 		}
 	case <-ctx.Done():
@@ -88,11 +99,11 @@ func serve(args []string) int {
 		defer cancel()
 		if err := srv.Shutdown(shutCtx); err != nil {
 			fmt.Fprintf(os.Stderr, "shutdown: %v\n", err)
-			_ = e.Close()
+			_ = nd.Close()
 			return 1
 		}
 	}
-	if err := e.Close(); err != nil {
+	if err := nd.Close(); err != nil {
 		fmt.Fprintf(os.Stderr, "close: %v\n", err)
 		return 1
 	}
@@ -199,7 +210,7 @@ func clientFlags(name string) (*flag.FlagSet, *string) {
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `Usage:
-  deepstore serve -data-dir DIR [-listen ADDR] [-snapshot-every N]
+  deepstore serve -data-dir DIR [-listen ADDR] [-node-id ID] [-raft-addr IP:PORT] [-snapshot-every N]
   deepstore put [-addr URL] KEY VALUE
   deepstore get [-addr URL] KEY
   deepstore delete [-addr URL] KEY
