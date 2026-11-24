@@ -1,25 +1,30 @@
 # deepstore
 
-A durable, linearizable key-value store. Acknowledged writes stay, retries apply once, and a Raft cluster serves Put, Get, Delete, and compare-and-swap over HTTP.
+A distributed key-value store. Three or more processes form a Raft cluster and serve Put, Get, Delete, and compare-and-swap over HTTP. The leader writes the log. A follower returns the leader's HTTP address, and the client retries there.
 
 ## Run
 
 ```
-go run ./cmd/deepstore serve -data-dir ./data
-go run ./cmd/deepstore put name ada
-go run ./cmd/deepstore cas name ada grace
-go run ./cmd/deepstore get name
-go run ./cmd/deepstore delete name
+go run ./cmd/deepstore serve -data-dir ./data1 -listen 127.0.0.1:7000 -raft-addr 127.0.0.1:7001 -node-id node1
 ```
 
-`serve` listens on `:7000` unless you pass `-listen`. Raft binds `127.0.0.1:7001` unless you pass `-raft-addr` (the address has to include an IP). `-node-id` defaults to `node1` and stays fixed for that data directory. An empty directory with no `-join` bootstraps a one-voter cluster. Further processes join that cluster:
+Wait until it prints `listening`, then start the other processes:
 
 ```
 go run ./cmd/deepstore serve -data-dir ./data2 -listen 127.0.0.1:7002 -raft-addr 127.0.0.1:7003 -node-id node2 -join http://127.0.0.1:7000
 go run ./cmd/deepstore serve -data-dir ./data3 -listen 127.0.0.1:7004 -raft-addr 127.0.0.1:7005 -node-id node3 -join http://127.0.0.1:7000
 ```
 
-Each process has its own data directory, node id, Raft address, and HTTP address. A follower serves HTTP and names the leader. The client retries there. Three voters keep the cluster available when one process is down. The client commands talk to `http://127.0.0.1:7000`.
+Each process has its own data directory, node id, Raft port, and HTTP port. `-node-id` and `-raft-addr` stay the same for that directory. `-raft-addr` must include an IP.
+
+```
+go run ./cmd/deepstore put name ada
+go run ./cmd/deepstore cas name ada grace
+go run ./cmd/deepstore get name
+go run ./cmd/deepstore delete name
+```
+
+Client commands use `http://127.0.0.1:7000` unless you pass `-addr`.
 
 | Method | Path | Request | Response |
 | --- | --- | --- | --- |
@@ -29,35 +34,34 @@ Each process has its own data directory, node id, Raft address, and HTTP address
 | `POST` | `/v1/keys/{key}/cas` | `{"expected":"...","value":"...","client_id":N,"seq":N}` | `{"index":N,"swapped":true}` |
 | `POST` | `/v1/join` | `{"id":"...","raft_addr":"ip:port","http_addr":"http://host:port"}` | 204 |
 
-## A write
+A follower returns `503` and `{"error":"node: not leader","leader":"http://host:port"}`.
 
-The server proposes the command to the Raft log. A majority of the voters have to store it before the leader answers. After the entry commits, the state machine sets the command index from the Raft log index and applies it. Compare-and-swap uses that same path: the entry is committed either way, and the map changes only when the key is present and equals `expected`. A miss still advances the index. `swapped` is false and the value stays as it was. A follower answers 503 and includes the leader's HTTP address.
+## Writes
 
-Each write carries a client id and a sequence number. The id is chosen by the client. Sequence 1 is that client's first command, and each new command adds one. The state machine remembers the latest sequence and its result. Sending that sequence again returns the original index and the original `swapped` flag, and does not propose. Any other sequence is rejected. The CLI picks a new id per process and uses sequence 1 for its single command.
+The leader appends the command. It answers after a majority of voters have stored it. Compare-and-swap commits either way. The value changes only when the key is present and equals `expected`.
 
-A get runs on the leader after a barrier, so the map includes every command committed before the read.
+Each write has a client id and a sequence. Sequence 1 is that client's first command. The next command uses the next sequence. Repeating the latest sequence returns the original result. Any other sequence is rejected.
 
-## Recovery
+## Restart
 
-`raft-log.db` and `raft-stable.db` in the data directory are the Raft log. Snapshots are under `raft-snap`. Restart opens the same directory with the same node id and Raft address, restores the latest snapshot, and replays the tail. A command that was acknowledged is in that state.
+Restart a process with the same data directory, node id, and Raft address. The directory holds `raft-log.db`, `raft-stable.db`, and `raft-snap`. With three voters, the cluster still serves if one process is down.
 
-Concurrent histories, including ones that kill the server and restart it on the same directory, are checked with [Porcupine](https://github.com/anishathalye/porcupine). A call that timed out or lost its connection is an unknown outcome.
+Snapshots run every 1024 log entries. `serve -snapshot-every 0` turns that off.
 
 ## Layout
 
 | Package | Role |
 | --- | --- |
-| `internal/store` | In-memory map. Applies one record. No disk. |
-| `internal/wal` | Append-only file, checksums, `Sync`, replay. |
-| `internal/snapshot` | Checksummed checkpoint of the map and sessions. |
-| `internal/node` | Raft node. Proposes commands, adds voters, and applies them through the state machine. |
-| `internal/engine` | Single-node commit path. `serve` does not call it. |
+| `internal/node` | One Raft server. |
+| `internal/node/convert` | Bytes for log entries and the HTTP-address list. |
 | `internal/server` | HTTP API. |
-| `cmd/deepstore` | `serve`, plus a small client. |
+| `internal/client` | Client. Retries on the leader. |
+| `internal/store` | In-memory map. |
+| `cmd/deepstore` | `serve` and the client commands. |
 
-After the configured number of Raft log entries, the library writes a snapshot and compacts the prefix. The default is 1024. `serve -snapshot-every 0` leaves the log whole. The state-machine snapshot frame is the one in [docs/snapshot.md](docs/snapshot.md).
+`internal/engine` and `internal/wal` are the old single-process path. `serve` does not use them.
 
-- [docs/durability.md](docs/durability.md) — durable log, replay, and what an ack means
-- [docs/snapshot.md](docs/snapshot.md) — snapshot file, log compaction, and recovery
-- [docs/node.md](docs/node.md) — serve path, sessions, group commit, and the linearizability harness
-- [cmd/README.md](cmd/README.md) — flags and routes
+- [docs/durability.md](docs/durability.md)
+- [docs/snapshot.md](docs/snapshot.md)
+- [docs/node.md](docs/node.md)
+- [cmd/README.md](cmd/README.md)
