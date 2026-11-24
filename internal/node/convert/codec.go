@@ -1,4 +1,4 @@
-package node
+package convert
 
 import (
 	"encoding/binary"
@@ -9,30 +9,30 @@ import (
 )
 
 const (
-	cmdVersion byte = 1
-	opPut      byte = 1
-	opDelete   byte = 2
-	opCAS      byte = 3
+	cmdVersion  byte = 1
+	opPut       byte = 1
+	opDelete    byte = 2
+	opCAS       byte = 3
+	opAdvertise byte = 4
 )
 
 const maxCommandSize = 16 << 20
 
-// encodeCommand writes a command without a log index. The Raft log assigns
-// the index, and Apply copies it onto the command before the state machine
-// sees it.
-func encodeCommand(cmd store.Command) ([]byte, error) {
+// EncodeCommand turns a command into bytes.
+// Those bytes do not include a log index. Raft picks the index when it stores the entry, and Apply copies it onto the command.
+func EncodeCommand(cmd store.Command) ([]byte, error) {
 	if cmd.Key == "" {
-		return nil, fmt.Errorf("node: empty key")
+		return nil, fmt.Errorf("convert: empty key")
 	}
 	if cmd.ClientID == 0 || cmd.Seq == 0 {
-		return nil, fmt.Errorf("node: %w: client id and seq are required", errs.ErrSession)
+		return nil, fmt.Errorf("convert: %w: client id and seq are required", errs.ErrSession)
 	}
 	op, err := encodeOp(cmd.Type)
 	if err != nil {
 		return nil, err
 	}
 	if cmd.Type != store.CommandTypeCAS && cmd.Expected != "" {
-		return nil, fmt.Errorf("node: expected set on %s", cmd.Type)
+		return nil, fmt.Errorf("convert: expected set on %s", cmd.Type)
 	}
 
 	key := []byte(cmd.Key)
@@ -45,11 +45,11 @@ func encodeCommand(cmd store.Command) ([]byte, error) {
 		expected = []byte(cmd.Expected)
 	}
 	if len(key) > int(^uint32(0)) || len(value) > int(^uint32(0)) || len(expected) > int(^uint32(0)) {
-		return nil, fmt.Errorf("node: command too large")
+		return nil, fmt.Errorf("convert: command too large")
 	}
 	n := 1 + 1 + 8 + 8 + 4 + len(key) + 4 + len(value) + 4 + len(expected)
 	if n > maxCommandSize {
-		return nil, fmt.Errorf("node: command too large")
+		return nil, fmt.Errorf("convert: command too large")
 	}
 
 	buf := make([]byte, n)
@@ -72,15 +72,15 @@ func encodeCommand(cmd store.Command) ([]byte, error) {
 	return buf, nil
 }
 
-func decodeCommand(data []byte) (store.Command, error) {
+func DecodeCommand(data []byte) (store.Command, error) {
 	if len(data) > maxCommandSize {
-		return store.Command{}, fmt.Errorf("node: command too large")
+		return store.Command{}, fmt.Errorf("convert: command too large")
 	}
 	if len(data) < 18+4 {
-		return store.Command{}, fmt.Errorf("node: command too short")
+		return store.Command{}, fmt.Errorf("convert: command too short")
 	}
 	if data[0] != cmdVersion {
-		return store.Command{}, fmt.Errorf("node: unknown command version %d", data[0])
+		return store.Command{}, fmt.Errorf("convert: unknown command version %d", data[0])
 	}
 	op := data[1]
 	cmd := store.Command{
@@ -93,7 +93,7 @@ func decodeCommand(data []byte) (store.Command, error) {
 		return store.Command{}, err
 	}
 	if cmd.ClientID == 0 || cmd.Seq == 0 {
-		return store.Command{}, fmt.Errorf("node: %w: client id and seq are required", errs.ErrSession)
+		return store.Command{}, fmt.Errorf("convert: %w: client id and seq are required", errs.ErrSession)
 	}
 	off := 18
 	key, off, err := takeBytes(data, off)
@@ -101,7 +101,7 @@ func decodeCommand(data []byte) (store.Command, error) {
 		return store.Command{}, err
 	}
 	if len(key) == 0 {
-		return store.Command{}, fmt.Errorf("node: empty key")
+		return store.Command{}, fmt.Errorf("convert: empty key")
 	}
 	value, off, err := takeBytes(data, off)
 	if err != nil {
@@ -112,13 +112,13 @@ func decodeCommand(data []byte) (store.Command, error) {
 		return store.Command{}, err
 	}
 	if off != len(data) {
-		return store.Command{}, fmt.Errorf("node: trailing command bytes")
+		return store.Command{}, fmt.Errorf("convert: trailing command bytes")
 	}
 	if cmd.Type == store.CommandTypeDelete {
 		value = nil
 	}
 	if cmd.Type != store.CommandTypeCAS && len(expected) != 0 {
-		return store.Command{}, fmt.Errorf("node: expected set on %s", cmd.Type)
+		return store.Command{}, fmt.Errorf("convert: expected set on %s", cmd.Type)
 	}
 	cmd.Key = string(key)
 	cmd.Value = string(value)
@@ -128,16 +128,66 @@ func decodeCommand(data []byte) (store.Command, error) {
 
 func takeBytes(data []byte, off int) ([]byte, int, error) {
 	if len(data)-off < 4 {
-		return nil, 0, fmt.Errorf("node: command too short")
+		return nil, 0, fmt.Errorf("convert: command too short")
 	}
 	n := binary.LittleEndian.Uint32(data[off:])
 	off += 4
 	if int(n) > len(data)-off {
-		return nil, 0, fmt.Errorf("node: command length exceeds payload")
+		return nil, 0, fmt.Errorf("convert: command length exceeds payload")
 	}
 	buf := make([]byte, n)
 	copy(buf, data[off:off+int(n)])
 	return buf, off + int(n), nil
+}
+
+func IsAdvertise(data []byte) bool {
+	return len(data) >= 2 && data[0] == cmdVersion && data[1] == opAdvertise
+}
+
+func EncodeAdvertise(id, httpAddr string) ([]byte, error) {
+	if id == "" || httpAddr == "" {
+		return nil, fmt.Errorf("convert: id and http address are required")
+	}
+	idb := []byte(id)
+	addrb := []byte(httpAddr)
+	n := 2 + 4 + len(idb) + 4 + len(addrb)
+	if n > maxCommandSize {
+		return nil, fmt.Errorf("convert: command too large")
+	}
+	buf := make([]byte, n)
+	buf[0] = cmdVersion
+	buf[1] = opAdvertise
+	off := putBytes(buf, 2, idb)
+	putBytes(buf, off, addrb)
+	return buf, nil
+}
+
+func DecodeAdvertise(data []byte) (string, string, error) {
+	if !IsAdvertise(data) {
+		return "", "", fmt.Errorf("convert: not an advertise command")
+	}
+	id, off, err := takeBytes(data, 2)
+	if err != nil {
+		return "", "", err
+	}
+	addr, off, err := takeBytes(data, off)
+	if err != nil {
+		return "", "", err
+	}
+	if off != len(data) {
+		return "", "", fmt.Errorf("convert: trailing command bytes")
+	}
+	if len(id) == 0 || len(addr) == 0 {
+		return "", "", fmt.Errorf("convert: id and http address are required")
+	}
+	return string(id), string(addr), nil
+}
+
+func putBytes(buf []byte, off int, b []byte) int {
+	binary.LittleEndian.PutUint32(buf[off:], uint32(len(b)))
+	off += 4
+	copy(buf[off:], b)
+	return off + len(b)
 }
 
 func encodeOp(t store.CommandType) (byte, error) {
@@ -149,7 +199,7 @@ func encodeOp(t store.CommandType) (byte, error) {
 	case store.CommandTypeCAS:
 		return opCAS, nil
 	default:
-		return 0, fmt.Errorf("node: unsupported command %q", t)
+		return 0, fmt.Errorf("convert: unsupported command %q", t)
 	}
 }
 
@@ -162,6 +212,6 @@ func decodeOp(op byte) (store.CommandType, error) {
 	case opCAS:
 		return store.CommandTypeCAS, nil
 	default:
-		return "", fmt.Errorf("node: unsupported op %d", op)
+		return "", fmt.Errorf("convert: unsupported op %d", op)
 	}
 }

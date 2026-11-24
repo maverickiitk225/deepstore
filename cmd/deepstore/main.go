@@ -5,13 +5,17 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/deepanker/deepstore/internal/client"
+	"github.com/deepanker/deepstore/internal/errs"
 	"github.com/deepanker/deepstore/internal/node"
 	"github.com/deepanker/deepstore/internal/server"
 )
@@ -46,9 +50,10 @@ func serve(args []string) int {
 	listen := fs.String("listen", ":7000", "address to listen on")
 	nodeID := fs.String("node-id", "node1", "stable raft id for this data directory")
 	raftAddr := fs.String("raft-addr", "127.0.0.1:7001", "raft bind address, including an IP")
+	join := fs.String("join", "", "http address of an existing node; empty starts a new cluster")
 	every := fs.Uint64("snapshot-every", node.DefaultSnapshotThreshold, "raft log entries between snapshots (0 disables)")
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: deepstore serve -data-dir DIR [-listen ADDR] [-node-id ID] [-raft-addr IP:PORT] [-snapshot-every N]\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: deepstore serve -data-dir DIR [-listen ADDR] [-node-id ID] [-raft-addr IP:PORT] [-join URL] [-snapshot-every N]\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -64,6 +69,7 @@ func serve(args []string) int {
 		Dir:               *dataDir,
 		NodeID:            *nodeID,
 		RaftAddr:          *raftAddr,
+		Bootstrap:         *join == "",
 		SnapshotThreshold: *every,
 	})
 	if err != nil {
@@ -73,10 +79,28 @@ func serve(args []string) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	if err := nd.WaitForLeader(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "leader: %v\n", err)
-		_ = nd.Close()
-		return 1
+	httpAddr := advertiseURL(*listen)
+	if *join != "" {
+		fmt.Fprintf(os.Stderr, "joining %s\n", *join)
+		if err := joinCluster(ctx, nd, *join, *nodeID, httpAddr); err != nil {
+			fmt.Fprintf(os.Stderr, "join: %v\n", err)
+			_ = nd.Close()
+			return 1
+		}
+		go advertiseWhenLeader(ctx, nd, httpAddr)
+	} else if nd.VoterCount() <= 1 {
+		if err := nd.WaitForLeader(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "leader: %v\n", err)
+			_ = nd.Close()
+			return 1
+		}
+		if err := nd.Advertise(httpAddr); err != nil {
+			fmt.Fprintf(os.Stderr, "advertise: %v\n", err)
+			_ = nd.Close()
+			return 1
+		}
+	} else {
+		go advertiseWhenLeader(ctx, nd, httpAddr)
 	}
 
 	srv := server.New(nd, *listen)
@@ -108,6 +132,58 @@ func serve(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+func joinCluster(ctx context.Context, nd *node.Node, leader, id, httpAddr string) error {
+	if nd.HasExistingState() {
+		joinCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		if err := node.Join(joinCtx, leader, id, nd.RaftAddr(), httpAddr); err != nil {
+			fmt.Fprintf(os.Stderr, "join: %v\n", err)
+		}
+		return nil
+	}
+	return node.Join(ctx, leader, id, nd.RaftAddr(), httpAddr)
+}
+
+func advertiseWhenLeader(ctx context.Context, nd *node.Node, httpAddr string) {
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		err := nd.Advertise(httpAddr)
+		if err == nil {
+			return
+		}
+		if !errors.Is(err, errs.ErrNotLeader) {
+			fmt.Fprintf(os.Stderr, "advertise: %v\n", err)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func advertiseURL(listen string) string {
+	listen = strings.TrimSpace(listen)
+	if strings.Contains(listen, "://") {
+		u, err := url.Parse(listen)
+		if err != nil || u.Host == "" {
+			return strings.TrimRight(listen, "/")
+		}
+		u.Path, u.RawQuery, u.Fragment = "", "", ""
+		return strings.TrimRight(u.String(), "/")
+	}
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		return "http://" + strings.TrimRight(listen, "/")
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port)
 }
 
 func putCmd(args []string) int {
@@ -210,7 +286,7 @@ func clientFlags(name string) (*flag.FlagSet, *string) {
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `Usage:
-  deepstore serve -data-dir DIR [-listen ADDR] [-node-id ID] [-raft-addr IP:PORT] [-snapshot-every N]
+  deepstore serve -data-dir DIR [-listen ADDR] [-node-id ID] [-raft-addr IP:PORT] [-join URL] [-snapshot-every N]
   deepstore put [-addr URL] KEY VALUE
   deepstore get [-addr URL] KEY
   deepstore delete [-addr URL] KEY

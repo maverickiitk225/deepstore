@@ -12,11 +12,13 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
 
 type Client struct {
+	mu       sync.Mutex
 	base     string
 	hc       *http.Client
 	clientID uint64
@@ -42,8 +44,8 @@ func New(addr string) *Client {
 	}
 }
 
-// NextSeq returns the next sequence for a new command. A retry of a command
-// whose response was lost must reuse the sequence from the first attempt.
+// NextSeq returns the next sequence number for a new command.
+// If a response was lost, send the same sequence again instead of calling NextSeq.
 func (c *Client) NextSeq() uint64 {
 	return c.seq.Add(1)
 }
@@ -148,38 +150,110 @@ func (c *Client) DeleteSeq(ctx context.Context, key string, seq uint64) (uint64,
 }
 
 func (c *Client) keyURL(key string) string {
-	return c.base + "/v1/keys/" + url.PathEscape(key)
+	return c.baseURL() + "/v1/keys/" + url.PathEscape(key)
 }
 
+func (c *Client) baseURL() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.base
+}
+
+func (c *Client) setBase(base string) {
+	base = strings.TrimRight(base, "/")
+	if !strings.Contains(base, "://") {
+		base = "http://" + base
+	}
+	c.mu.Lock()
+	c.base = base
+	c.mu.Unlock()
+}
+
+// If this server is not the leader, the response includes the leader address.
+// The same request is then sent to that address.
 func (c *Client) do(req *http.Request, dst any) error {
-	resp, err := c.hc.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20+1024))
-	if err != nil {
-		return err
-	}
-	if resp.StatusCode == http.StatusNotFound {
-		return errNotFound
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		var body struct {
-			Error string `json:"error"`
+	var body []byte
+	if req.Body != nil {
+		var err error
+		body, err = io.ReadAll(req.Body)
+		_ = req.Body.Close()
+		if err != nil {
+			return err
 		}
-		if json.Unmarshal(data, &body) == nil && body.Error != "" {
-			return fmt.Errorf("server: %s", body.Error)
-		}
-		return fmt.Errorf("server: status %d", resp.StatusCode)
 	}
-	if dst == nil || len(data) == 0 {
+	const maxHops = 5
+	for hop := 0; ; hop++ {
+		attempt := req.Clone(req.Context())
+		if body != nil {
+			attempt.Body = io.NopCloser(bytes.NewReader(body))
+			attempt.ContentLength = int64(len(body))
+		}
+		resp, err := c.hc.Do(attempt)
+		if err != nil {
+			return err
+		}
+		data, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20+1024))
+		_ = resp.Body.Close()
+		if err != nil {
+			return err
+		}
+		if resp.StatusCode == http.StatusServiceUnavailable && hop < maxHops {
+			var hint struct {
+				Leader string `json:"leader"`
+			}
+			if json.Unmarshal(data, &hint) == nil && hint.Leader != "" && !sameBase(c.baseURL(), hint.Leader) {
+				next, err := retarget(attempt.URL.String(), hint.Leader)
+				if err == nil {
+					u, err := url.Parse(next)
+					if err == nil {
+						req.URL = u
+						c.setBase(hint.Leader)
+						continue
+					}
+				}
+			}
+		}
+		if resp.StatusCode == http.StatusNotFound {
+			return errNotFound
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			var errBody struct {
+				Error string `json:"error"`
+			}
+			if json.Unmarshal(data, &errBody) == nil && errBody.Error != "" {
+				return fmt.Errorf("server: %s", errBody.Error)
+			}
+			return fmt.Errorf("server: status %d", resp.StatusCode)
+		}
+		if dst == nil || len(data) == 0 {
+			return nil
+		}
+		if err := json.Unmarshal(data, dst); err != nil {
+			return fmt.Errorf("client: decode response: %w", err)
+		}
 		return nil
 	}
-	if err := json.Unmarshal(data, dst); err != nil {
-		return fmt.Errorf("client: decode response: %w", err)
+}
+
+func sameBase(a, b string) bool {
+	return strings.TrimRight(a, "/") == strings.TrimRight(b, "/")
+}
+
+func retarget(raw, base string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", err
 	}
-	return nil
+	if !strings.Contains(base, "://") {
+		base = "http://" + base
+	}
+	parsed, err := url.Parse(base)
+	if err != nil || parsed.Host == "" {
+		return "", fmt.Errorf("client: leader %q", base)
+	}
+	u.Scheme = parsed.Scheme
+	u.Host = parsed.Host
+	return u.String(), nil
 }
 
 var errNotFound = errors.New("not found")

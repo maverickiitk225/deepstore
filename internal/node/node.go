@@ -5,12 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/deepanker/deepstore/internal/errs"
+	"github.com/deepanker/deepstore/internal/node/convert"
 	"github.com/deepanker/deepstore/internal/store"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
@@ -23,20 +27,26 @@ const (
 	applyTimeout = 5 * time.Second
 )
 
-// Config opens one voter. A later Open of the same directory reuses the log
-// and does not bootstrap again. NodeID has to stay the same for that directory.
+// Config is the settings for one server.
+// Use the same NodeID and RaftAddr each time you open Dir.
+// Set Bootstrap to true only on the first server of a new cluster.
+// If Dir already has a Raft log, Open reuses that log.
 type Config struct {
-	Dir               string
-	NodeID            string
-	RaftAddr          string
-	SnapshotThreshold uint64 // 0 disables automatic snapshots
+	Dir       string
+	NodeID    string
+	RaftAddr  string
+	Bootstrap bool
+	// SnapshotThreshold is how many log entries to write before saving a snapshot.
+	// Zero turns automatic snapshots off.
+	SnapshotThreshold uint64
 	LogOutput         io.Writer
-	// Raft, when set, supplies timeouts and the logger. LocalID and
-	// SnapshotThreshold are overwritten from this config.
+	// Raft sets timeouts and the logger. Open still fills in LocalID and SnapshotThreshold from this config.
 	Raft *raft.Config
 }
 
 type Node struct {
+	id        string
+	existing  bool
 	fsm       *fsm
 	raft      *raft.Raft
 	transport *raft.NetworkTransport
@@ -92,8 +102,8 @@ func Open(cfg Config) (*Node, error) {
 	rc := cfg.Raft
 	if rc == nil {
 		rc = raft.DefaultConfig()
-		// The threshold is checked on this interval. Keep it short so
-		// -snapshot-every takes effect without waiting on the library default.
+		// Raft looks for a due snapshot on this timer.
+		// The library default is 2 minutes, which is too slow for -snapshot-every.
 		rc.SnapshotInterval = 200 * time.Millisecond
 	}
 	rc.LocalID = raft.ServerID(cfg.NodeID)
@@ -118,8 +128,16 @@ func Open(cfg Config) (*Node, error) {
 		_ = logs.Close()
 		return nil, fmt.Errorf("node: raft: %w", err)
 	}
-	n := &Node{fsm: fsm, raft: r, transport: transport, logs: logs, stable: stable}
-	if has {
+	n := &Node{
+		id:        cfg.NodeID,
+		existing:  has,
+		fsm:       fsm,
+		raft:      r,
+		transport: transport,
+		logs:      logs,
+		stable:    stable,
+	}
+	if has || !cfg.Bootstrap {
 		return n, nil
 	}
 	fut := r.BootstrapCluster(raft.Configuration{
@@ -140,8 +158,199 @@ func (n *Node) RaftAddr() string {
 	return string(n.transport.LocalAddr())
 }
 
-// WaitForLeader blocks until this node is the leader and a barrier has
-// applied, or ctx ends.
+func (n *Node) HasExistingState() bool {
+	return n.existing
+}
+
+func (n *Node) VoterCount() int {
+	fut := n.raft.GetConfiguration()
+	if err := fut.Error(); err != nil {
+		return 0
+	}
+	count := 0
+	for _, server := range fut.Configuration().Servers {
+		if server.Suffrage == raft.Voter {
+			count++
+		}
+	}
+	return count
+}
+
+func (n *Node) LeaderHTTP() string {
+	_, id := n.raft.LeaderWithID()
+	if id == "" {
+		return ""
+	}
+	return n.httpAddr(string(id))
+}
+
+// AddServer adds a server that can vote.
+// raftAddr must already be accepting connections.
+// httpAddr is the address clients should use for that server.
+// This returns after the new server is a voter.
+func (n *Node) AddServer(id, raftAddr, httpAddr string) error {
+	httpAddr, err := normalizeHTTP(httpAddr)
+	if err != nil {
+		return err
+	}
+	raftAddr, err = normalizeRaftAddr(raftAddr)
+	if err != nil {
+		return err
+	}
+	if id == "" {
+		return fmt.Errorf("node: id is required")
+	}
+	if id == n.id && raftAddr != n.RaftAddr() {
+		return fmt.Errorf("node: id %s is this server at %s", id, n.RaftAddr())
+	}
+	if n.raft.State() != raft.Leader {
+		return fmt.Errorf("node: %w", errs.ErrNotLeader)
+	}
+	already, err := n.isVoter(id, raftAddr)
+	if err != nil {
+		return err
+	}
+	if !already {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		fut := n.raft.AddVoter(raft.ServerID(id), raft.ServerAddress(raftAddr), 0, applyTimeout)
+		if err := waitFuture(ctx, fut); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				return fmt.Errorf("node: add voter %s: timed out", id)
+			}
+			if errors.Is(err, raft.ErrNotLeader) || errors.Is(err, raft.ErrLeadershipLost) {
+				return fmt.Errorf("node: %w", errs.ErrNotLeader)
+			}
+			return fmt.Errorf("node: add voter: %w", err)
+		}
+		vctx, vcancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer vcancel()
+		if err := n.waitVoter(vctx, id, raftAddr); err != nil {
+			return err
+		}
+	}
+	return n.recordHTTP(id, httpAddr)
+}
+
+func (n *Node) Advertise(httpAddr string) error {
+	httpAddr, err := normalizeHTTP(httpAddr)
+	if err != nil {
+		return err
+	}
+	return n.recordHTTP(n.id, httpAddr)
+}
+
+func (n *Node) recordHTTP(id, httpAddr string) error {
+	if n.httpAddr(id) == httpAddr {
+		return nil
+	}
+	if n.raft.State() != raft.Leader {
+		return fmt.Errorf("node: %w", errs.ErrNotLeader)
+	}
+	payload, err := convert.EncodeAdvertise(id, httpAddr)
+	if err != nil {
+		return err
+	}
+	fut := n.raft.Apply(payload, applyTimeout)
+	if err := fut.Error(); err != nil {
+		return leaderErr(err)
+	}
+	res, ok := fut.Response().(applyResult)
+	if !ok {
+		return fmt.Errorf("node: unexpected apply response %T", fut.Response())
+	}
+	return res.err
+}
+
+func (n *Node) httpAddr(id string) string {
+	n.fsm.mu.RLock()
+	defer n.fsm.mu.RUnlock()
+	return n.fsm.http[id]
+}
+
+func (n *Node) applied() uint64 {
+	n.fsm.mu.RLock()
+	defer n.fsm.mu.RUnlock()
+	return n.fsm.index
+}
+
+func (n *Node) isVoter(id, addr string) (bool, error) {
+	fut := n.raft.GetConfiguration()
+	if err := fut.Error(); err != nil {
+		return false, err
+	}
+	for _, server := range fut.Configuration().Servers {
+		if string(server.ID) == id && string(server.Address) == addr && server.Suffrage == raft.Voter {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (n *Node) waitVoter(ctx context.Context, id, addr string) error {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		ok, err := n.isVoter(id, addr)
+		if err != nil {
+			return err
+		}
+		if ok {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("node: wait for voter %s: %w", id, ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+func waitFuture(ctx context.Context, fut raft.Future) error {
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- fut.Error()
+	}()
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func normalizeHTTP(addr string) (string, error) {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return "", fmt.Errorf("node: http address is required")
+	}
+	if !strings.Contains(addr, "://") {
+		addr = "http://" + addr
+	}
+	u, err := url.Parse(addr)
+	if err != nil || u.Host == "" {
+		return "", fmt.Errorf("node: http address %q", addr)
+	}
+	u.Path = ""
+	u.RawQuery = ""
+	u.Fragment = ""
+	return strings.TrimRight(u.String(), "/"), nil
+}
+
+func normalizeRaftAddr(addr string) (string, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || port == "" {
+		return "", fmt.Errorf("node: raft address must be host:port")
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || ip.IsUnspecified() {
+		return "", fmt.Errorf("node: raft address must be a specific IP")
+	}
+	return net.JoinHostPort(ip.String(), port), nil
+}
+
+// WaitForLeader waits until this server is the leader and its map includes every committed write.
+// It also returns when ctx is canceled.
 func (n *Node) WaitForLeader(ctx context.Context) error {
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
@@ -218,7 +427,7 @@ func (n *Node) propose(cmd store.Command) (uint64, bool, error) {
 	if err := n.checkNext(cmd); err != nil {
 		return 0, false, err
 	}
-	payload, err := encodeCommand(cmd)
+	payload, err := convert.EncodeCommand(cmd)
 	if err != nil {
 		return 0, false, err
 	}

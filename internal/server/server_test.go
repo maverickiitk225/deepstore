@@ -2,7 +2,10 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -11,6 +14,7 @@ import (
 
 	"github.com/deepanker/deepstore/internal/client"
 	"github.com/deepanker/deepstore/internal/engine"
+	"github.com/deepanker/deepstore/internal/errs"
 )
 
 type engineStore struct{ *engine.Engine }
@@ -225,5 +229,167 @@ func TestPutGetDeleteRoundTrip(t *testing.T) {
 	}
 	if v, ok := e.Get("keep"); !ok || v != "yes" {
 		t.Fatalf("Get(keep) after restart = (%q, %v), want (yes, true)", v, ok)
+	}
+}
+
+type joinStore struct {
+	leader   string
+	id       string
+	raftAddr string
+	httpAddr string
+}
+
+func (j *joinStore) Put(string, string, uint64, uint64) (uint64, error) {
+	return 0, fmt.Errorf("node: %w", errs.ErrNotLeader)
+}
+
+func (j *joinStore) Delete(string, uint64, uint64) (uint64, error) {
+	return 0, fmt.Errorf("node: %w", errs.ErrNotLeader)
+}
+
+func (j *joinStore) CAS(string, string, string, uint64, uint64) (uint64, bool, error) {
+	return 0, false, fmt.Errorf("node: %w", errs.ErrNotLeader)
+}
+
+func (j *joinStore) Get(string) (string, bool, error) {
+	return "", false, fmt.Errorf("node: %w", errs.ErrNotLeader)
+}
+
+func (j *joinStore) LeaderHTTP() string { return j.leader }
+
+func (j *joinStore) AddServer(id, raftAddr, httpAddr string) error {
+	if j.leader != "" {
+		return fmt.Errorf("node: %w", errs.ErrNotLeader)
+	}
+	j.id, j.raftAddr, j.httpAddr = id, raftAddr, httpAddr
+	return nil
+}
+
+func TestClientFollowsLeader(t *testing.T) {
+	dir := t.TempDir()
+	e, err := engine.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaderLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	leader := New(engineStore{e}, leaderLn.Addr().String())
+	leaderErr := make(chan error, 1)
+	go func() { leaderErr <- leader.Serve(leaderLn) }()
+
+	followerLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	follower := New(&joinStore{leader: "http://" + leaderLn.Addr().String()}, followerLn.Addr().String())
+	followerErr := make(chan error, 1)
+	go func() { followerErr <- follower.Serve(followerLn) }()
+
+	c := client.New("http://" + followerLn.Addr().String())
+	ctx := context.Background()
+	index, err := c.Put(ctx, "k", "v")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if index != 1 {
+		t.Fatalf("Put index = %d, want 1", index)
+	}
+	got, ok, err := c.Get(ctx, "k")
+	if err != nil || !ok || got != "v" {
+		t.Fatalf("Get = (%q, %v, %v), want (v, true, nil)", got, ok, err)
+	}
+
+	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := follower.Shutdown(shutCtx); err != nil {
+		t.Fatal(err)
+	}
+	if err := leader.Shutdown(shutCtx); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, ch := range []chan error{leaderErr, followerErr} {
+		select {
+		case err := <-ch:
+			if err != nil && !errors.Is(err, http.ErrServerClosed) {
+				t.Fatal(err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("server did not stop")
+		}
+	}
+}
+
+func TestJoinRoute(t *testing.T) {
+	st := &joinStore{}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(st, ln.Addr().String())
+	errCh := make(chan error, 1)
+	go func() { errCh <- s.Serve(ln) }()
+	base := "http://" + ln.Addr().String()
+
+	resp, err := http.Post(base+"/v1/join", "application/json", strings.NewReader(`{"id":"n2","raft_addr":"127.0.0.1:7003","http_addr":"http://127.0.0.1:7002"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("join status = %d, want 204", resp.StatusCode)
+	}
+	if st.id != "n2" || st.raftAddr != "127.0.0.1:7003" || st.httpAddr != "http://127.0.0.1:7002" {
+		t.Fatalf("joined %+v", st)
+	}
+
+	resp, err = http.Post(base+"/v1/join", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("empty join status = %d, want 400", resp.StatusCode)
+	}
+
+	st.leader = "http://127.0.0.1:7000"
+	resp, err = http.Post(base+"/v1/join", "application/json", strings.NewReader(`{"id":"n3","raft_addr":"127.0.0.1:7005","http_addr":"http://127.0.0.1:7004"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("follower join status = %d, want 503", resp.StatusCode)
+	}
+	var body struct {
+		Leader string `json:"leader"`
+	}
+	if err := json.Unmarshal(data, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Leader != "http://127.0.0.1:7000" {
+		t.Fatalf("leader = %q", body.Leader)
+	}
+
+	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.Shutdown(shutCtx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not stop")
 	}
 }

@@ -32,6 +32,7 @@ func New(store storage, addr string) *Server {
 	mux.HandleFunc("GET /v1/keys/{key}", s.get)
 	mux.HandleFunc("DELETE /v1/keys/{key}", s.delete)
 	mux.HandleFunc("POST /v1/keys/{key}/cas", s.cas)
+	mux.HandleFunc("POST /v1/join", s.join)
 	s.http = &http.Server{
 		Addr:              addr,
 		Handler:           mux,
@@ -73,7 +74,7 @@ func (s *Server) put(w http.ResponseWriter, r *http.Request) {
 	}
 	index, err := s.store.Put(key, body.Value, body.ClientID, body.Seq)
 	if err != nil {
-		writeStatus(w, err)
+		s.writeStatus(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, struct {
@@ -84,7 +85,7 @@ func (s *Server) put(w http.ResponseWriter, r *http.Request) {
 func (s *Server) get(w http.ResponseWriter, r *http.Request) {
 	value, ok, err := s.store.Get(r.PathValue("key"))
 	if err != nil {
-		writeStatus(w, err)
+		s.writeStatus(w, err)
 		return
 	}
 	if !ok {
@@ -114,7 +115,7 @@ func (s *Server) cas(w http.ResponseWriter, r *http.Request) {
 	}
 	index, swapped, err := s.store.CAS(key, body.Expected, body.Value, body.ClientID, body.Seq)
 	if err != nil {
-		writeStatus(w, err)
+		s.writeStatus(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, struct {
@@ -138,7 +139,7 @@ func (s *Server) delete(w http.ResponseWriter, r *http.Request) {
 	}
 	index, err := s.store.Delete(r.PathValue("key"), body.ClientID, body.Seq)
 	if err != nil {
-		writeStatus(w, err)
+		s.writeStatus(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, struct {
@@ -165,12 +166,49 @@ func requireSession(clientID, seq uint64) error {
 	return nil
 }
 
-func writeStatus(w http.ResponseWriter, err error) {
+type joiner interface {
+	AddServer(id, raftAddr, httpAddr string) error
+}
+
+func (s *Server) join(w http.ResponseWriter, r *http.Request) {
+	j, ok := s.store.(joiner)
+	if !ok {
+		writeError(w, http.StatusNotFound, errors.New("join is not supported"))
+		return
+	}
+	var body struct {
+		ID       string `json:"id"`
+		RaftAddr string `json:"raft_addr"`
+		HTTPAddr string `json:"http_addr"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if body.ID == "" || body.RaftAddr == "" || body.HTTPAddr == "" {
+		writeError(w, http.StatusBadRequest, errors.New("id, raft_addr, and http_addr are required"))
+		return
+	}
+	if err := j.AddServer(body.ID, body.RaftAddr, body.HTTPAddr); err != nil {
+		s.writeStatus(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) writeStatus(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, errs.ErrSession):
 		writeError(w, http.StatusBadRequest, err)
 	case errors.Is(err, errs.ErrNotLeader):
-		writeError(w, http.StatusServiceUnavailable, err)
+		body := struct {
+			Error  string `json:"error"`
+			Leader string `json:"leader,omitempty"`
+		}{Error: err.Error()}
+		if leader, ok := s.store.(interface{ LeaderHTTP() string }); ok {
+			body.Leader = leader.LeaderHTTP()
+		}
+		writeJSON(w, http.StatusServiceUnavailable, body)
 	default:
 		writeError(w, http.StatusInternalServerError, err)
 	}
