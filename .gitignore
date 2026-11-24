@@ -4,6 +4,8 @@
 # Binaries for programs and plugins
 /deepstore
 build/
+*.db
+*.log
 *.exe
 *.exe~
 *.dll
