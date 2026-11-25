@@ -126,17 +126,17 @@ func (c *Client) request(ctx context.Context, call *writeCall) (*http.Request, e
 		}{ClientID: c.clientID, Seq: call.seq}
 	case opCAS:
 		payload = struct {
-			Expected string `json:"expected"`
-			Value    string `json:"value"`
+			Expected []byte `json:"expected"`
+			Value    []byte `json:"value"`
 			ClientID uint64 `json:"client_id"`
 			Seq      uint64 `json:"seq"`
-		}{Expected: call.expected, Value: call.value, ClientID: c.clientID, Seq: call.seq}
+		}{Expected: []byte(call.expected), Value: []byte(call.value), ClientID: c.clientID, Seq: call.seq}
 	default:
 		payload = struct {
-			Value    string `json:"value"`
+			Value    []byte `json:"value"`
 			ClientID uint64 `json:"client_id"`
 			Seq      uint64 `json:"seq"`
-		}{Value: call.value, ClientID: c.clientID, Seq: call.seq}
+		}{Value: []byte(call.value), ClientID: c.clientID, Seq: call.seq}
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

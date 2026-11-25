@@ -70,10 +70,10 @@ func (c *Client) Put(ctx context.Context, key, value string) (uint64, error) {
 
 func (c *Client) PutSeq(ctx context.Context, key, value string, seq uint64) (uint64, error) {
 	body, err := json.Marshal(struct {
-		Value    string `json:"value"`
+		Value    []byte `json:"value"`
 		ClientID uint64 `json:"client_id"`
 		Seq      uint64 `json:"seq"`
-	}{Value: value, ClientID: c.clientID, Seq: seq})
+	}{Value: []byte(value), ClientID: c.clientID, Seq: seq})
 	if err != nil {
 		return 0, err
 	}
@@ -97,7 +97,7 @@ func (c *Client) Get(ctx context.Context, key string) (string, bool, error) {
 		return "", false, err
 	}
 	var out struct {
-		Value string `json:"value"`
+		Value []byte `json:"value"`
 	}
 	if err := c.do(req, &out); err != nil {
 		if errors.Is(err, errNotFound) {
@@ -105,7 +105,7 @@ func (c *Client) Get(ctx context.Context, key string) (string, bool, error) {
 		}
 		return "", false, err
 	}
-	return out.Value, true, nil
+	return string(out.Value), true, nil
 }
 
 func (c *Client) CAS(ctx context.Context, key, expected, value string) (uint64, bool, error) {
@@ -122,11 +122,11 @@ func (c *Client) CAS(ctx context.Context, key, expected, value string) (uint64, 
 
 func (c *Client) CASSeq(ctx context.Context, key, expected, value string, seq uint64) (uint64, bool, error) {
 	body, err := json.Marshal(struct {
-		Expected string `json:"expected"`
-		Value    string `json:"value"`
+		Expected []byte `json:"expected"`
+		Value    []byte `json:"value"`
 		ClientID uint64 `json:"client_id"`
 		Seq      uint64 `json:"seq"`
-	}{Expected: expected, Value: value, ClientID: c.clientID, Seq: seq})
+	}{Expected: []byte(expected), Value: []byte(value), ClientID: c.clientID, Seq: seq})
 	if err != nil {
 		return 0, false, err
 	}

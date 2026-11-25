@@ -232,6 +232,90 @@ func TestPutGetDeleteRoundTrip(t *testing.T) {
 	}
 }
 
+func TestBinaryValueRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	e, err := engine.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(engineStore{e}, ln.Addr().String())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- s.Serve(ln)
+	}()
+
+	value := string([]byte{0xff, 0xfe, 0x00, 'a'})
+	next := string([]byte{0x80, 0x81})
+	c := client.New("http://" + ln.Addr().String())
+	ctx := context.Background()
+	if _, err := c.Put(ctx, "k", value); err != nil {
+		t.Fatal(err)
+	}
+	if stored, ok := e.Get("k"); !ok || stored != value {
+		t.Fatalf("stored = %q ok %v, want the original bytes", stored, ok)
+	}
+	got, ok, err := c.Get(ctx, "k")
+	if err != nil || !ok || got != value {
+		t.Fatalf("Get = (%q, %v, %v), want the original bytes", got, ok, err)
+	}
+	index, swapped, err := c.CAS(ctx, "k", value, next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if index != 2 || !swapped {
+		t.Fatalf("CAS = (%d, %v), want (2, true)", index, swapped)
+	}
+	if stored, ok := e.Get("k"); !ok || stored != next {
+		t.Fatalf("stored after CAS = %q ok %v, want the new bytes", stored, ok)
+	}
+
+	c2 := client.New("http://" + ln.Addr().String())
+	if _, err := c2.PutSeq(ctx, "other", value, 1); err != nil {
+		t.Fatal(err)
+	}
+	if stored, ok := e.Get("other"); !ok || stored != value {
+		t.Fatalf("PutSeq stored = %q ok %v, want the original bytes", stored, ok)
+	}
+	if _, swapped, err := c2.CASSeq(ctx, "other", value, next, 2); err != nil || !swapped {
+		t.Fatalf("CASSeq swapped = %v, err %v; want true, nil", swapped, err)
+	}
+
+	req, err := http.NewRequest(http.MethodPut, "http://"+ln.Addr().String()+"/v1/keys/bad", strings.NewReader(`{"value":"!!!!","client_id":1,"seq":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid base64 status = %d, want 400", resp.StatusCode)
+	}
+
+	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.Shutdown(shutCtx); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not stop")
+	}
+}
+
 type joinStore struct {
 	leader   string
 	id       string

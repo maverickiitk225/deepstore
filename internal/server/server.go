@@ -60,7 +60,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 func (s *Server) put(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
 	var body struct {
-		Value    string `json:"value"`
+		Value    []byte `json:"value"`
 		ClientID uint64 `json:"client_id"`
 		Seq      uint64 `json:"seq"`
 	}
@@ -72,7 +72,7 @@ func (s *Server) put(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	index, err := s.store.Put(key, body.Value, body.ClientID, body.Seq)
+	index, err := s.store.Put(key, string(body.Value), body.ClientID, body.Seq)
 	if err != nil {
 		s.writeStatus(w, err)
 		return
@@ -93,15 +93,15 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, struct {
-		Value string `json:"value"`
-	}{Value: value})
+		Value []byte `json:"value"`
+	}{Value: []byte(value)})
 }
 
 func (s *Server) cas(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
 	var body struct {
-		Expected string `json:"expected"`
-		Value    string `json:"value"`
+		Expected []byte `json:"expected"`
+		Value    []byte `json:"value"`
 		ClientID uint64 `json:"client_id"`
 		Seq      uint64 `json:"seq"`
 	}
@@ -113,7 +113,7 @@ func (s *Server) cas(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	index, swapped, err := s.store.CAS(key, body.Expected, body.Value, body.ClientID, body.Seq)
+	index, swapped, err := s.store.CAS(key, string(body.Expected), string(body.Value), body.ClientID, body.Seq)
 	if err != nil {
 		s.writeStatus(w, err)
 		return

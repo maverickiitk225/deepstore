@@ -385,12 +385,12 @@ func readSeq(t *testing.T, r *http.Request) (uint64, string) {
 	t.Helper()
 	var body struct {
 		Seq   uint64 `json:"seq"`
-		Value string `json:"value"`
+		Value []byte `json:"value"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		t.Errorf("decode body: %v", err)
 	}
-	return body.Seq, body.Value
+	return body.Seq, string(body.Value)
 }
 
 func writeResult(w http.ResponseWriter, index uint64, swapped bool) {
