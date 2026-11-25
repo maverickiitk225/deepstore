@@ -25,6 +25,10 @@ const (
 	DefaultSnapshotThreshold uint64 = 1024
 
 	applyTimeout = 5 * time.Second
+
+	raftLogFile    = "raft-log.db"
+	raftStableFile = "raft-stable.db"
+	raftSnapDir    = "raft-snap"
 )
 
 // Config is the settings for one server.
@@ -68,16 +72,16 @@ func Open(cfg Config) (*Node, error) {
 		logOutput = os.Stderr
 	}
 
-	logs, err := raftboltdb.NewBoltStore(filepath.Join(cfg.Dir, "raft-log.db"))
+	logs, err := raftboltdb.NewBoltStore(filepath.Join(cfg.Dir, raftLogFile))
 	if err != nil {
 		return nil, fmt.Errorf("node: log store: %w", err)
 	}
-	stable, err := raftboltdb.NewBoltStore(filepath.Join(cfg.Dir, "raft-stable.db"))
+	stable, err := raftboltdb.NewBoltStore(filepath.Join(cfg.Dir, raftStableFile))
 	if err != nil {
 		_ = logs.Close()
 		return nil, fmt.Errorf("node: stable store: %w", err)
 	}
-	snapDir := filepath.Join(cfg.Dir, "raft-snap")
+	snapDir := filepath.Join(cfg.Dir, raftSnapDir)
 	snaps, err := raft.NewFileSnapshotStore(snapDir, 2, logOutput)
 	if err != nil {
 		_ = stable.Close()
@@ -152,6 +156,66 @@ func Open(cfg Config) (*Node, error) {
 		return nil, fmt.Errorf("node: bootstrap: %w", err)
 	}
 	return n, nil
+}
+
+// HasExistingState reports whether dir already holds a Raft log, term, or snapshot.
+// A missing directory does not. Empty store files left by an earlier open do not either.
+func HasExistingState(dir string) (bool, error) {
+	if dir == "" {
+		return false, fmt.Errorf("node: dir is required")
+	}
+	info, err := os.Stat(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("node: existing state: %w", err)
+	}
+	if !info.IsDir() {
+		return false, fmt.Errorf("node: existing state: %s is not a directory", dir)
+	}
+	logPath := filepath.Join(dir, raftLogFile)
+	stablePath := filepath.Join(dir, raftStableFile)
+	snapPath := filepath.Join(dir, raftSnapDir)
+	found, err := anyPathExists(logPath, stablePath, snapPath)
+	if err != nil {
+		return false, fmt.Errorf("node: existing state: %w", err)
+	}
+	if !found {
+		return false, nil
+	}
+	logs, err := raftboltdb.NewBoltStore(logPath)
+	if err != nil {
+		return false, fmt.Errorf("node: existing state: %w", err)
+	}
+	defer logs.Close()
+	stable, err := raftboltdb.NewBoltStore(stablePath)
+	if err != nil {
+		return false, fmt.Errorf("node: existing state: %w", err)
+	}
+	defer stable.Close()
+	snaps, err := raft.NewFileSnapshotStore(snapPath, 2, io.Discard)
+	if err != nil {
+		return false, fmt.Errorf("node: existing state: %w", err)
+	}
+	has, err := raft.HasExistingState(logs, stable, snaps)
+	if err != nil {
+		return false, fmt.Errorf("node: existing state: %w", err)
+	}
+	return has, nil
+}
+
+func anyPathExists(paths ...string) (bool, error) {
+	for _, path := range paths {
+		_, err := os.Stat(path)
+		if err == nil {
+			return true, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return false, err
+		}
+	}
+	return false, nil
 }
 
 func (n *Node) RaftAddr() string {

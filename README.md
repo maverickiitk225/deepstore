@@ -11,10 +11,10 @@ A distributed key-value store. Three or more processes form a Raft cluster and s
 
 The first command starts three processes. The number starts that many. The script writes `name=ada` and reads it back. Ctrl-C stops them. Data stays in `.cluster/`.
 
-To start the processes yourself:
+To start the processes yourself, pass `-bootstrap` on the first process only:
 
 ```
-go run ./cmd/deepstore serve -data-dir ./data1 -listen 127.0.0.1:7000 -raft-addr 127.0.0.1:7001 -node-id node1
+go run ./cmd/deepstore serve -data-dir ./data1 -listen 127.0.0.1:7000 -raft-addr 127.0.0.1:7001 -node-id node1 -bootstrap
 ```
 
 Wait until it prints `listening`, then start the other processes:

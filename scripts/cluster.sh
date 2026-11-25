@@ -35,6 +35,8 @@ start_node() {
 	local -a args=(serve -data-dir "$dir" -listen "$listen" -raft-addr "$raft" -node-id "$id")
 	if [[ -n "$join" ]]; then
 		args+=(-join "$join")
+	else
+		args+=(-bootstrap)
 	fi
 	mkdir -p "$dir"
 	"$bin" "${args[@]}" >"$logs/$id.log" 2>&1 &

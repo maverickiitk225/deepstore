@@ -1,6 +1,6 @@
 # Node
 
-`deepstore serve` opens a Raft node (`internal/node`) and serves HTTP until SIGINT or SIGTERM. With no `-join`, an empty directory bootstraps a one-voter cluster and HTTP starts once that process is leader. `-join` adds this process as another voter; a follower serves HTTP and names the leader. A data directory that already belongs to the cluster serves on restart without waiting to win an election. Shutdown stops accepting, finishes in-flight requests, and shuts Raft down. Flags and routes are in [cmd/README.md](../cmd/README.md).
+`deepstore serve` opens a Raft node (`internal/node`) and serves HTTP until SIGINT or SIGTERM. `-bootstrap` on an empty directory forms a one-voter cluster, and HTTP starts once that process is leader. `-join` adds this process as another voter; a follower serves HTTP and names the leader. Passing both joins a reachable peer and does not form a second cluster; if that address does not answer, startup exits. A data directory that already belongs to the cluster serves on restart without waiting to win an election, and it does not bootstrap again. Shutdown stops accepting, finishes in-flight requests, and shuts Raft down. Flags and routes are in [cmd/README.md](../cmd/README.md).
 
 The sections below describe `internal/engine`, the single-node commit path. `serve` does not call it. Record layout, `Sync`, and replay are in [durability.md](durability.md). Snapshots and log compaction are in [snapshot.md](snapshot.md).
 

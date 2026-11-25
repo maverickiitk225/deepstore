@@ -50,10 +50,11 @@ func serve(args []string) int {
 	listen := fs.String("listen", ":7000", "address to listen on")
 	nodeID := fs.String("node-id", "node1", "stable raft id for this data directory")
 	raftAddr := fs.String("raft-addr", "127.0.0.1:7001", "raft bind address, including an IP")
-	join := fs.String("join", "", "http address of an existing node; empty starts a new cluster")
+	bootstrap := fs.Bool("bootstrap", false, "form a new cluster when the data directory is empty")
+	join := fs.String("join", "", "http address of a node in an existing cluster")
 	every := fs.Uint64("snapshot-every", node.DefaultSnapshotThreshold, "raft log entries between snapshots (0 disables)")
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: deepstore serve -data-dir DIR [-listen ADDR] [-node-id ID] [-raft-addr IP:PORT] [-join URL] [-snapshot-every N]\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: deepstore serve -data-dir DIR [-listen ADDR] [-node-id ID] [-raft-addr IP:PORT] [-bootstrap] [-join URL] [-snapshot-every N]\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -65,11 +66,33 @@ func serve(args []string) int {
 		return 2
 	}
 
+	has, err := node.HasExistingState(*dataDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "open: %v\n", err)
+		return 1
+	}
+	peerReachable := false
+	if !has && *bootstrap && *join != "" {
+		peerReachable, err = joinPeerReachable(*join)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			return 2
+		}
+		if peerReachable {
+			fmt.Fprintf(os.Stderr, "-bootstrap ignored: %s is reachable\n", *join)
+		}
+	}
+	doBootstrap, err := resolveBootstrap(has, *bootstrap, *join, peerReachable)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 2
+	}
+
 	nd, err := node.Open(node.Config{
 		Dir:               *dataDir,
 		NodeID:            *nodeID,
 		RaftAddr:          *raftAddr,
-		Bootstrap:         *join == "",
+		Bootstrap:         doBootstrap,
 		SnapshotThreshold: *every,
 	})
 	if err != nil {
@@ -132,6 +155,49 @@ func serve(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// resolveBootstrap reports whether this process may form a new one-node cluster.
+// An existing data directory never bootstraps. An empty one bootstraps only when
+// wantBootstrap is set and join is empty. When both are set, a reachable join
+// address is joined instead, and an unreachable one refuses to start.
+func resolveBootstrap(hasState, wantBootstrap bool, join string, peerReachable bool) (bool, error) {
+	if hasState || (join != "" && !wantBootstrap) {
+		return false, nil
+	}
+	if join == "" {
+		if !wantBootstrap {
+			return false, errors.New("data directory has no cluster state: pass -bootstrap to create a cluster, or -join to join one")
+		}
+		return true, nil
+	}
+	if peerReachable {
+		return false, nil
+	}
+	return false, errors.New("refusing -bootstrap because the join peer is not reachable. Omit -bootstrap to wait for it, or omit -join to create a new cluster")
+}
+
+func joinPeerReachable(raw string) (bool, error) {
+	target := strings.TrimSpace(raw)
+	if target == "" {
+		return false, errors.New("join address is empty")
+	}
+	if !strings.Contains(target, "://") {
+		target = "http://" + target
+	}
+	u, err := url.Parse(target)
+	if err != nil {
+		return false, fmt.Errorf("join address: %w", err)
+	}
+	if _, _, err := net.SplitHostPort(u.Host); err != nil {
+		return false, fmt.Errorf("join address %q needs a host and port", raw)
+	}
+	conn, err := net.DialTimeout("tcp", u.Host, 2*time.Second)
+	if err != nil {
+		return false, nil
+	}
+	_ = conn.Close()
+	return true, nil
 }
 
 func joinCluster(ctx context.Context, nd *node.Node, leader, id, httpAddr string) error {
@@ -286,7 +352,7 @@ func clientFlags(name string) (*flag.FlagSet, *string) {
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `Usage:
-  deepstore serve -data-dir DIR [-listen ADDR] [-node-id ID] [-raft-addr IP:PORT] [-join URL] [-snapshot-every N]
+  deepstore serve -data-dir DIR [-listen ADDR] [-node-id ID] [-raft-addr IP:PORT] [-bootstrap] [-join URL] [-snapshot-every N]
   deepstore put [-addr URL] KEY VALUE
   deepstore get [-addr URL] KEY
   deepstore delete [-addr URL] KEY

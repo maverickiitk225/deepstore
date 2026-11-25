@@ -17,6 +17,54 @@ import (
 	"github.com/hashicorp/raft"
 )
 
+func TestHasExistingState(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+	has, err := HasExistingState(missing)
+	if err != nil || has {
+		t.Fatalf("missing dir = (%v, %v), want (false, nil)", has, err)
+	}
+
+	dir := t.TempDir()
+	has, err = HasExistingState(dir)
+	if err != nil || has {
+		t.Fatalf("empty dir = (%v, %v), want (false, nil)", has, err)
+	}
+
+	file := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := HasExistingState(file); err == nil {
+		t.Fatal("file path err = nil, want an error")
+	}
+
+	n, err := Open(Config{
+		Dir:       dir,
+		NodeID:    "n1",
+		RaftAddr:  "127.0.0.1:0",
+		LogOutput: io.Discard,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := n.Close(); err != nil {
+		t.Fatal(err)
+	}
+	has, err = HasExistingState(dir)
+	if err != nil || has {
+		t.Fatalf("open without bootstrap = (%v, %v), want (false, nil)", has, err)
+	}
+
+	n = openNode(t, dir, "127.0.0.1:0", 0)
+	if err := n.Close(); err != nil {
+		t.Fatal(err)
+	}
+	has, err = HasExistingState(dir)
+	if err != nil || !has {
+		t.Fatalf("after bootstrap = (%v, %v), want (true, nil)", has, err)
+	}
+}
+
 func TestPutGetReopen(t *testing.T) {
 	dir := t.TempDir()
 	n := openNode(t, dir, "127.0.0.1:0", 0)

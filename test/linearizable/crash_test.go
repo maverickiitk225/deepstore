@@ -241,7 +241,7 @@ func (p *serverProc) start(bin, dir, addr string, snapshotEvery uint64) error {
 	p.kill()
 	var last error
 	for i := 0; i < 50; i++ {
-		cmd := exec.Command(bin, "serve", "-data-dir", dir, "-listen", addr, "-raft-addr", p.raftAddr, "-snapshot-every", strconv.FormatUint(snapshotEvery, 10))
+		cmd := exec.Command(bin, "serve", "-data-dir", dir, "-listen", addr, "-raft-addr", p.raftAddr, "-bootstrap", "-snapshot-every", strconv.FormatUint(snapshotEvery, 10))
 		cmd.Stdout = io.Discard
 		cmd.Stderr = io.Discard
 		if err := cmd.Start(); err != nil {
