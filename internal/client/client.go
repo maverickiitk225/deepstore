@@ -17,12 +17,19 @@ import (
 	"time"
 )
 
+// Client sends requests to one server and follows the leader hint.
+// Put, Delete, and CAS retry a write with the same sequence until the server accepts it.
+// NextSeq is only for PutSeq, DeleteSeq, and CASSeq, which send one request.
 type Client struct {
 	mu       sync.Mutex
 	base     string
 	hc       *http.Client
 	clientID uint64
 	seq      atomic.Uint64
+
+	writeMu sync.Mutex
+	acked   uint64
+	pending *writeCall
 }
 
 func New(addr string) *Client {
@@ -44,14 +51,21 @@ func New(addr string) *Client {
 	}
 }
 
-// NextSeq returns the next sequence number for a new command.
-// If a response was lost, send the same sequence again instead of calling NextSeq.
+// NextSeq returns the next sequence for PutSeq, DeleteSeq, or CASSeq.
+// On a lost response, send that same sequence again.
 func (c *Client) NextSeq() uint64 {
 	return c.seq.Add(1)
 }
 
 func (c *Client) Put(ctx context.Context, key, value string) (uint64, error) {
-	return c.PutSeq(ctx, key, value, c.NextSeq())
+	var out struct {
+		Index uint64 `json:"index"`
+	}
+	err := c.commit(ctx, &writeCall{kind: opPut, key: key, value: value}, &out)
+	if err != nil {
+		return 0, err
+	}
+	return out.Index, nil
 }
 
 func (c *Client) PutSeq(ctx context.Context, key, value string, seq uint64) (uint64, error) {
@@ -95,7 +109,15 @@ func (c *Client) Get(ctx context.Context, key string) (string, bool, error) {
 }
 
 func (c *Client) CAS(ctx context.Context, key, expected, value string) (uint64, bool, error) {
-	return c.CASSeq(ctx, key, expected, value, c.NextSeq())
+	var out struct {
+		Index   uint64 `json:"index"`
+		Swapped bool   `json:"swapped"`
+	}
+	err := c.commit(ctx, &writeCall{kind: opCAS, key: key, expected: expected, value: value}, &out)
+	if err != nil {
+		return 0, false, err
+	}
+	return out.Index, out.Swapped, nil
 }
 
 func (c *Client) CASSeq(ctx context.Context, key, expected, value string, seq uint64) (uint64, bool, error) {
@@ -124,7 +146,14 @@ func (c *Client) CASSeq(ctx context.Context, key, expected, value string, seq ui
 }
 
 func (c *Client) Delete(ctx context.Context, key string) (uint64, error) {
-	return c.DeleteSeq(ctx, key, c.NextSeq())
+	var out struct {
+		Index uint64 `json:"index"`
+	}
+	err := c.commit(ctx, &writeCall{kind: opDelete, key: key}, &out)
+	if err != nil {
+		return 0, err
+	}
+	return out.Index, nil
 }
 
 func (c *Client) DeleteSeq(ctx context.Context, key string, seq uint64) (uint64, error) {
@@ -221,9 +250,9 @@ func (c *Client) do(req *http.Request, dst any) error {
 				Error string `json:"error"`
 			}
 			if json.Unmarshal(data, &errBody) == nil && errBody.Error != "" {
-				return fmt.Errorf("server: %s", errBody.Error)
+				return &statusError{code: resp.StatusCode, msg: errBody.Error}
 			}
-			return fmt.Errorf("server: status %d", resp.StatusCode)
+			return &statusError{code: resp.StatusCode}
 		}
 		if dst == nil || len(data) == 0 {
 			return nil

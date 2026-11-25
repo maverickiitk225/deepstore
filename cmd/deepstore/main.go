@@ -265,7 +265,9 @@ func putCmd(args []string) int {
 		fs.Usage()
 		return 2
 	}
-	index, err := client.New(*addr).Put(context.Background(), fs.Arg(0), fs.Arg(1))
+	ctx, cancel := clientContext()
+	defer cancel()
+	index, err := client.New(*addr).Put(ctx, fs.Arg(0), fs.Arg(1))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "put: %v\n", err)
 		return 1
@@ -312,7 +314,9 @@ func deleteCmd(args []string) int {
 		fs.Usage()
 		return 2
 	}
-	index, err := client.New(*addr).Delete(context.Background(), fs.Arg(0))
+	ctx, cancel := clientContext()
+	defer cancel()
+	index, err := client.New(*addr).Delete(ctx, fs.Arg(0))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "delete: %v\n", err)
 		return 1
@@ -334,13 +338,20 @@ func casCmd(args []string) int {
 		fs.Usage()
 		return 2
 	}
-	index, swapped, err := client.New(*addr).CAS(context.Background(), fs.Arg(0), fs.Arg(1), fs.Arg(2))
+	ctx, cancel := clientContext()
+	defer cancel()
+	index, swapped, err := client.New(*addr).CAS(ctx, fs.Arg(0), fs.Arg(1), fs.Arg(2))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cas: %v\n", err)
 		return 1
 	}
 	fmt.Printf("%d %t\n", index, swapped)
 	return 0
+}
+
+// clientContext stops one CLI write after 30s.
+func clientContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), 30*time.Second)
 }
 
 func clientFlags(name string) (*flag.FlagSet, *string) {

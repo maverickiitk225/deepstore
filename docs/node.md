@@ -4,7 +4,7 @@
 
 The sections below describe `internal/engine`, the single-node commit path. `serve` does not call it. Record layout, `Sync`, and replay are in [durability.md](durability.md). Snapshots and log compaction are in [snapshot.md](snapshot.md).
 
-`put`, `get`, `delete`, and `cas` are clients of that server. `internal/client` uses one random non-zero client id per process. `NextSeq` is the next sequence. `PutSeq`, `DeleteSeq`, and `CASSeq` send a chosen sequence. The CLI sends sequence 1.
+`put`, `get`, `delete`, and `cas` are clients of that server. `internal/client` uses one random non-zero client id per process. `Put`, `Delete`, and `CAS` retry with the same sequence until the server accepts the write. `PutSeq`, `DeleteSeq`, and `CASSeq` send one chosen sequence. The CLI sends sequence 1.
 
 ## Indexes
 
