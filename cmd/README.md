@@ -1,31 +1,75 @@
-# cmd
+# deepstore command reference
 
-`cmd/deepstore` is the process you run.
+`cmd/deepstore` builds the `deepstore` binary. It runs a cluster node (`serve`) and provides client commands (`put`, `get`, `delete`, `cas`).
+
+```sh
+go build -o deepstore ./cmd/deepstore
+```
+
+## Commands
 
 ```
-deepstore serve -data-dir DIR [-listen ADDR] [-node-id ID] [-raft-addr IP:PORT] [-bootstrap] [-join URL [-replace]] [-snapshot-every N]
-deepstore put [-addr URL] KEY VALUE
-deepstore get [-addr URL] KEY
+deepstore serve  -data-dir DIR [flags]
+deepstore put    [-addr URL] KEY VALUE
+deepstore get    [-addr URL] KEY
 deepstore delete [-addr URL] KEY
-deepstore cas [-addr URL] KEY EXPECTED VALUE
+deepstore cas    [-addr URL] KEY EXPECTED VALUE
 ```
 
-`serve` opens a Raft node and keeps the HTTP API up until SIGINT or SIGTERM. `-bootstrap` on an empty directory creates a one-voter cluster, and HTTP starts once that process is leader. A later start of that directory reuses the log and does not bootstrap again. An empty directory with neither `-bootstrap` nor `-join` exits. `-join` is the HTTP address of a node already in the cluster; the new process is added as a voter and serves immediately. If the cluster already has `-node-id` at a different Raft address, the join is refused with 409 and the process exits, including on a restart of an existing directory. `-replace` moves that id to this process's `-raft-addr`; use it only when the server it names has moved or is gone for good. The leader's own id cannot be replaced. If both `-bootstrap` and `-join` are set and that address accepts a connection, the process joins and does not bootstrap. If the address does not answer, startup exits. A restarted member of a larger cluster serves even when it is a follower. Shutdown stops accepting, finishes in-flight requests, and shuts Raft down. `-node-id` defaults to `node1` and is fixed for the data directory. `-raft-addr` defaults to `127.0.0.1:7001` and has to include an IP. Use a specific `-listen` host when other machines will follow the leader URL. `-snapshot-every` is how many Raft log entries sit between snapshots. The default is 1024. `0` does not snapshot on its own. `put`, `get`, `delete`, and `cas` talk to any server in the cluster. A follower responds with the leader's HTTP address and the client retries there. Each process picks its own client id and sends sequence 1. The default address is `http://127.0.0.1:7000`.
+## `serve`
 
-Routes:
+Starts a node and serves the HTTP API until it receives SIGINT or SIGTERM.
 
-- `PUT /v1/keys/{key}` with `{"value":"<base64>","client_id":N,"seq":N}` returns `{"index":N}`
-- `GET /v1/keys/{key}` returns `{"value":"<base64>"}`, or 404
-- `DELETE /v1/keys/{key}` with `{"client_id":N,"seq":N}` returns `{"index":N}`
-- `POST /v1/keys/{key}/cas` with `{"expected":"<base64>","value":"<base64>","client_id":N,"seq":N}` returns `{"index":N,"swapped":true}`
+### Flags
 
-`value` and `expected` are standard base64. The stored bytes are the decoded value. A value that is not valid base64 is a 400.
-- `POST /v1/join` with `{"id":"...","raft_addr":"ip:port","http_addr":"http://host:port","replace":false}` returns 204 from the leader. An id already at another address returns 409 unless `replace` is true. `replace` is optional.
-- `GET /v1/status` returns this node's id, Raft state, term, leader HTTP address, commit and applied indexes, last snapshot index, key and session counts, and the peer list. A follower returns 200 with its own state.
-- `GET /healthz` returns `{"ok":true}` while the process is serving.
-- `GET /readyz` returns `{"ok":true}` when this node is a leader or a follower with a known leader, the follower has heard from the leader in the last 3 seconds, and the applied index is within 64 of the commit index. Otherwise it returns 503 and `{"ok":false,"reason":"..."}`.
-- `GET /metrics` returns Prometheus text. Raft timers and counters are included, along with `deepstore_raft_commit_index`, `deepstore_raft_applied_index`, `deepstore_raft_apply_lag`, `deepstore_raft_term`, `deepstore_raft_leader`, `deepstore_keys`, `deepstore_sessions`, and HTTP latency by route and status.
+| Flag | Default | Description |
+| --- | --- | --- |
+| `-data-dir` | (required) | Directory for the Raft log, Raft state, and snapshots |
+| `-node-id` | `node1` | Unique ID of this node. Must stay the same for a data directory. |
+| `-listen` | `:7000` | HTTP listen address. Use a specific host if other machines need to reach this node through leader redirects. |
+| `-raft-addr` | `127.0.0.1:7001` | Raft address. Must be an IP and port. Peers connect to this address. |
+| `-bootstrap` | `false` | Create a new single-node cluster if the data directory is empty |
+| `-join` | (none) | HTTP address of any node in an existing cluster to join |
+| `-replace` | `false` | With `-join`: move this node ID to `-raft-addr` if the cluster has it at a different address |
+| `-snapshot-every` | `1024` | Number of log entries between snapshots. `0` turns automatic snapshots off. |
 
-`/v1/status`, `/healthz`, `/readyz`, and `/metrics` read this process. They do not append a log entry and they do not redirect to the leader.
+### Startup behavior
 
-`cas` prints the index and `true` or `false`. A false result is a completed compare that left the key unchanged.
+| Data directory | Flags | Result |
+| --- | --- | --- |
+| Empty | `-bootstrap` | Creates a new cluster with this node as leader |
+| Empty | `-join URL` | Joins the existing cluster as a voter |
+| Empty | `-bootstrap -join URL` | Joins if `URL` is reachable. Otherwise exits, so a second cluster is not created by mistake. |
+| Empty | neither | Exits with an error |
+| Has cluster state | any | Rejoins using the stored state. Never bootstraps again. |
+
+If `-join` is set and the cluster already has this node ID at a different Raft address, the join is refused and the process exits. Pass `-replace` only when the node has really moved or the old one is gone for good.
+
+On shutdown the node stops accepting requests, waits up to 15 seconds for in-flight requests to finish, and then stops Raft.
+
+## Client commands
+
+`put`, `get`, `delete`, and `cas` send a request to `-addr`, which defaults to `http://127.0.0.1:7000`. Any node works. A follower redirects the request to the leader.
+
+| Command | Output on success |
+| --- | --- |
+| `put KEY VALUE` | Log index of the write |
+| `get KEY` | The value. A missing key prints nothing and exits with 1. |
+| `delete KEY` | Log index of the write |
+| `cas KEY EXPECTED VALUE` | Log index and `true` if the value was swapped, `false` if not |
+
+Each command gives up after 30 seconds. Writes that fail with an uncertain outcome, such as a lost response or a leader change, are retried within that time with the same sequence number, so they are applied at most once.
+
+Each CLI invocation uses a new client ID. Running the same command twice therefore applies it twice.
+
+### Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Success |
+| `1` | Request failed, or `get` found no key |
+| `2` | Invalid arguments |
+
+## HTTP API
+
+The API and the monitoring endpoints are documented in the [main README](../README.md#http-api).
