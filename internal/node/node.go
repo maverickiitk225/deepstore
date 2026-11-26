@@ -111,6 +111,8 @@ func Open(cfg Config) (*Node, error) {
 		rc.SnapshotInterval = 200 * time.Millisecond
 	}
 	rc.LocalID = raft.ServerID(cfg.NodeID)
+	// Peer ids in the metric name duplicate the labeled series.
+	rc.NoLegacyTelemetry = true
 	if cfg.SnapshotThreshold == 0 {
 		rc.SnapshotThreshold = ^uint64(0)
 	} else {

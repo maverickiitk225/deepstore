@@ -42,10 +42,14 @@ Client commands use `http://127.0.0.1:7000` unless you pass `-addr`.
 | `DELETE` | `/v1/keys/{key}` | `{"client_id":N,"seq":N}` | `{"index":N}` |
 | `POST` | `/v1/keys/{key}/cas` | `{"expected":"<base64>","value":"<base64>","client_id":N,"seq":N}` | `{"index":N,"swapped":true}` |
 | `POST` | `/v1/join` | `{"id":"...","raft_addr":"ip:port","http_addr":"http://host:port","replace":false}` | 204, or 409 when the id is at another address |
+| `GET` | `/v1/status` | | This node's id, state, term, leader, indexes, key and session counts, and peers |
+| `GET` | `/healthz` | | `{"ok":true}` when the process is serving |
+| `GET` | `/readyz` | | `{"ok":true}`, or 503 when this node has no leader, has not heard from the leader, or is more than 64 entries behind its commit index |
+| `GET` | `/metrics` | | Prometheus text |
 
 `value` and `expected` are standard base64. The stored bytes are the decoded value, including bytes that are not valid UTF-8. A value that is not valid base64 is a 400.
 
-A follower returns `503` and `{"error":"node: not leader","leader":"http://host:port"}`.
+A follower returns `503` and `{"error":"node: not leader","leader":"http://host:port"}` for a key or join. `/v1/status`, `/healthz`, `/readyz`, and `/metrics` answer from this process and do not redirect.
 
 ## Writes
 

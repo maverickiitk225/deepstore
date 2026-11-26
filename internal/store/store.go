@@ -105,6 +105,12 @@ func (s *StateMachine) Sessions() map[uint64]Session {
 	return maps.Clone(s.sessions)
 }
 
+func (s *StateMachine) Counts() (keys, sessions int) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.data), len(s.sessions)
+}
+
 func (s *StateMachine) Get(key string) (string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

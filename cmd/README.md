@@ -21,5 +21,11 @@ Routes:
 
 `value` and `expected` are standard base64. The stored bytes are the decoded value. A value that is not valid base64 is a 400.
 - `POST /v1/join` with `{"id":"...","raft_addr":"ip:port","http_addr":"http://host:port","replace":false}` returns 204 from the leader. An id already at another address returns 409 unless `replace` is true. `replace` is optional.
+- `GET /v1/status` returns this node's id, Raft state, term, leader HTTP address, commit and applied indexes, last snapshot index, key and session counts, and the peer list. A follower returns 200 with its own state.
+- `GET /healthz` returns `{"ok":true}` while the process is serving.
+- `GET /readyz` returns `{"ok":true}` when this node is a leader or a follower with a known leader, the follower has heard from the leader in the last 3 seconds, and the applied index is within 64 of the commit index. Otherwise it returns 503 and `{"ok":false,"reason":"..."}`.
+- `GET /metrics` returns Prometheus text. Raft timers and counters are included, along with `deepstore_raft_commit_index`, `deepstore_raft_applied_index`, `deepstore_raft_apply_lag`, `deepstore_raft_term`, `deepstore_raft_leader`, `deepstore_keys`, `deepstore_sessions`, and HTTP latency by route and status.
+
+`/v1/status`, `/healthz`, `/readyz`, and `/metrics` read this process. They do not append a log entry and they do not redirect to the leader.
 
 `cas` prints the index and `true` or `false`. A false result is a completed compare that left the key unchanged.

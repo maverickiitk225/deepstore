@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/deepanker/deepstore/internal/errs"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 const maxBody = 16<<20 + 1024
@@ -33,9 +34,13 @@ func New(store storage, addr string) *Server {
 	mux.HandleFunc("DELETE /v1/keys/{key}", s.delete)
 	mux.HandleFunc("POST /v1/keys/{key}/cas", s.cas)
 	mux.HandleFunc("POST /v1/join", s.join)
+	mux.HandleFunc("GET /v1/status", s.status)
+	mux.HandleFunc("GET /healthz", s.healthz)
+	mux.HandleFunc("GET /readyz", s.readyz)
+	mux.Handle("GET /metrics", promhttp.Handler())
 	s.http = &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           instrument(mux),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	return s

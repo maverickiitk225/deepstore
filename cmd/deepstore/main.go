@@ -66,6 +66,10 @@ func serve(args []string) int {
 		fs.Usage()
 		return 2
 	}
+	if err := enableMetrics(); err != nil {
+		fmt.Fprintf(os.Stderr, "metrics: %v\n", err)
+		return 1
+	}
 
 	has, err := node.HasExistingState(*dataDir)
 	if err != nil {
@@ -100,6 +104,7 @@ func serve(args []string) int {
 		fmt.Fprintf(os.Stderr, "open: %v\n", err)
 		return 1
 	}
+	server.RegisterNodeMetrics(nd)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
