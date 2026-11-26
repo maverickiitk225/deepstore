@@ -212,10 +212,10 @@ func TestJoinFailover(t *testing.T) {
 		t.Fatal("node became leader before joining")
 	}
 
-	if err := n1.AddServer("n2", n2.RaftAddr(), "http://127.0.0.1:2"); err != nil {
+	if err := n1.AddServer("n2", n2.RaftAddr(), "http://127.0.0.1:2", false); err != nil {
 		t.Fatal(err)
 	}
-	if err := n1.AddServer("n3", n3.RaftAddr(), "http://127.0.0.1:3"); err != nil {
+	if err := n1.AddServer("n3", n3.RaftAddr(), "http://127.0.0.1:3", false); err != nil {
 		t.Fatal(err)
 	}
 	if n1.VoterCount() != 3 {

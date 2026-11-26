@@ -9,9 +9,14 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/deepanker/deepstore/internal/errs"
 )
 
-func Join(ctx context.Context, leaderURL, id, raftAddr, httpAddr string) error {
+// Join adds this server to the cluster at leaderURL as a voter.
+// It retries until it succeeds or ctx is done, but returns at once on 400 or 409.
+// A 409 returns errs.ErrConflict.
+func Join(ctx context.Context, leaderURL, id, raftAddr, httpAddr string, replace bool) error {
 	httpAddr, err := normalizeHTTP(httpAddr)
 	if err != nil {
 		return err
@@ -27,7 +32,8 @@ func Join(ctx context.Context, leaderURL, id, raftAddr, httpAddr string) error {
 		ID       string `json:"id"`
 		RaftAddr string `json:"raft_addr"`
 		HTTPAddr string `json:"http_addr"`
-	}{ID: id, RaftAddr: raftAddr, HTTPAddr: httpAddr})
+		Replace  bool   `json:"replace,omitempty"`
+	}{ID: id, RaftAddr: raftAddr, HTTPAddr: httpAddr, Replace: replace})
 	if err != nil {
 		return err
 	}
@@ -91,8 +97,12 @@ func postJoin(ctx context.Context, client *http.Client, target string, payload [
 	if msg == "" {
 		msg = fmt.Sprintf("status %d", resp.StatusCode)
 	}
-	if resp.StatusCode == http.StatusBadRequest {
+	switch resp.StatusCode {
+	case http.StatusBadRequest:
 		return "", false, fmt.Errorf("node: join: %s", msg)
+	case http.StatusConflict:
+		msg = strings.TrimPrefix(msg, "node: "+errs.ErrConflict.Error()+": ")
+		return "", false, fmt.Errorf("%w: %s", errs.ErrConflict, msg)
 	}
 	return body.Leader, true, fmt.Errorf("node: join: %s", msg)
 }

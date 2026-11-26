@@ -167,7 +167,7 @@ func requireSession(clientID, seq uint64) error {
 }
 
 type joiner interface {
-	AddServer(id, raftAddr, httpAddr string) error
+	AddServer(id, raftAddr, httpAddr string, replace bool) error
 }
 
 func (s *Server) join(w http.ResponseWriter, r *http.Request) {
@@ -180,6 +180,7 @@ func (s *Server) join(w http.ResponseWriter, r *http.Request) {
 		ID       string `json:"id"`
 		RaftAddr string `json:"raft_addr"`
 		HTTPAddr string `json:"http_addr"`
+		Replace  bool   `json:"replace"`
 	}
 	if err := decodeJSON(w, r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -189,7 +190,7 @@ func (s *Server) join(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("id, raft_addr, and http_addr are required"))
 		return
 	}
-	if err := j.AddServer(body.ID, body.RaftAddr, body.HTTPAddr); err != nil {
+	if err := j.AddServer(body.ID, body.RaftAddr, body.HTTPAddr, body.Replace); err != nil {
 		s.writeStatus(w, err)
 		return
 	}
@@ -200,6 +201,8 @@ func (s *Server) writeStatus(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, errs.ErrSession):
 		writeError(w, http.StatusBadRequest, err)
+	case errors.Is(err, errs.ErrConflict):
+		writeError(w, http.StatusConflict, err)
 	case errors.Is(err, errs.ErrNotLeader):
 		body := struct {
 			Error  string `json:"error"`

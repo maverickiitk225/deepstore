@@ -321,6 +321,7 @@ type joinStore struct {
 	id       string
 	raftAddr string
 	httpAddr string
+	replace  bool
 }
 
 func (j *joinStore) Put(string, string, uint64, uint64) (uint64, error) {
@@ -341,11 +342,14 @@ func (j *joinStore) Get(string) (string, bool, error) {
 
 func (j *joinStore) LeaderHTTP() string { return j.leader }
 
-func (j *joinStore) AddServer(id, raftAddr, httpAddr string) error {
+func (j *joinStore) AddServer(id, raftAddr, httpAddr string, replace bool) error {
 	if j.leader != "" {
 		return fmt.Errorf("node: %w", errs.ErrNotLeader)
 	}
-	j.id, j.raftAddr, j.httpAddr = id, raftAddr, httpAddr
+	if id == "taken" && !replace {
+		return fmt.Errorf("node: %w: id taken is already a server at 127.0.0.1:9", errs.ErrConflict)
+	}
+	j.id, j.raftAddr, j.httpAddr, j.replace = id, raftAddr, httpAddr, replace
 	return nil
 }
 
@@ -440,6 +444,27 @@ func TestJoinRoute(t *testing.T) {
 		t.Fatalf("empty join status = %d, want 400", resp.StatusCode)
 	}
 
+	resp, err = http.Post(base+"/v1/join", "application/json", strings.NewReader(`{"id":"taken","raft_addr":"127.0.0.1:7003","http_addr":"http://127.0.0.1:7002"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("duplicate id join status = %d, want 409", resp.StatusCode)
+	}
+
+	resp, err = http.Post(base+"/v1/join", "application/json", strings.NewReader(`{"id":"taken","raft_addr":"127.0.0.1:7003","http_addr":"http://127.0.0.1:7002","replace":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("replace join status = %d, want 204", resp.StatusCode)
+	}
+	if st.id != "taken" || !st.replace {
+		t.Fatalf("replace joined %+v", st)
+	}
+
 	st.leader = "http://127.0.0.1:7000"
 	resp, err = http.Post(base+"/v1/join", "application/json", strings.NewReader(`{"id":"n3","raft_addr":"127.0.0.1:7005","http_addr":"http://127.0.0.1:7004"}`))
 	if err != nil {
@@ -463,6 +488,8 @@ func TestJoinRoute(t *testing.T) {
 		t.Fatalf("leader = %q", body.Leader)
 	}
 
+	// Close unused client connections, or Shutdown waits 5 seconds for them.
+	http.DefaultClient.CloseIdleConnections()
 	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := s.Shutdown(shutCtx); err != nil {

@@ -3,14 +3,14 @@
 `cmd/deepstore` is the process you run.
 
 ```
-deepstore serve -data-dir DIR [-listen ADDR] [-node-id ID] [-raft-addr IP:PORT] [-bootstrap] [-join URL] [-snapshot-every N]
+deepstore serve -data-dir DIR [-listen ADDR] [-node-id ID] [-raft-addr IP:PORT] [-bootstrap] [-join URL [-replace]] [-snapshot-every N]
 deepstore put [-addr URL] KEY VALUE
 deepstore get [-addr URL] KEY
 deepstore delete [-addr URL] KEY
 deepstore cas [-addr URL] KEY EXPECTED VALUE
 ```
 
-`serve` opens a Raft node and keeps the HTTP API up until SIGINT or SIGTERM. `-bootstrap` on an empty directory creates a one-voter cluster, and HTTP starts once that process is leader. A later start of that directory reuses the log and does not bootstrap again. An empty directory with neither `-bootstrap` nor `-join` exits. `-join` is the HTTP address of a node already in the cluster; the new process is added as a voter and serves immediately. If both `-bootstrap` and `-join` are set and that address accepts a connection, the process joins and does not bootstrap. If the address does not answer, startup exits. A restarted member of a larger cluster serves even when it is a follower. Shutdown stops accepting, finishes in-flight requests, and shuts Raft down. `-node-id` defaults to `node1` and is fixed for the data directory. `-raft-addr` defaults to `127.0.0.1:7001` and has to include an IP. Use a specific `-listen` host when other machines will follow the leader URL. `-snapshot-every` is how many Raft log entries sit between snapshots. The default is 1024. `0` does not snapshot on its own. `put`, `get`, `delete`, and `cas` talk to any server in the cluster. A follower responds with the leader's HTTP address and the client retries there. Each process picks its own client id and sends sequence 1. The default address is `http://127.0.0.1:7000`.
+`serve` opens a Raft node and keeps the HTTP API up until SIGINT or SIGTERM. `-bootstrap` on an empty directory creates a one-voter cluster, and HTTP starts once that process is leader. A later start of that directory reuses the log and does not bootstrap again. An empty directory with neither `-bootstrap` nor `-join` exits. `-join` is the HTTP address of a node already in the cluster; the new process is added as a voter and serves immediately. If the cluster already has `-node-id` at a different Raft address, the join is refused with 409 and the process exits, including on a restart of an existing directory. `-replace` moves that id to this process's `-raft-addr`; use it only when the server it names has moved or is gone for good. The leader's own id cannot be replaced. If both `-bootstrap` and `-join` are set and that address accepts a connection, the process joins and does not bootstrap. If the address does not answer, startup exits. A restarted member of a larger cluster serves even when it is a follower. Shutdown stops accepting, finishes in-flight requests, and shuts Raft down. `-node-id` defaults to `node1` and is fixed for the data directory. `-raft-addr` defaults to `127.0.0.1:7001` and has to include an IP. Use a specific `-listen` host when other machines will follow the leader URL. `-snapshot-every` is how many Raft log entries sit between snapshots. The default is 1024. `0` does not snapshot on its own. `put`, `get`, `delete`, and `cas` talk to any server in the cluster. A follower responds with the leader's HTTP address and the client retries there. Each process picks its own client id and sends sequence 1. The default address is `http://127.0.0.1:7000`.
 
 Routes:
 
@@ -20,6 +20,6 @@ Routes:
 - `POST /v1/keys/{key}/cas` with `{"expected":"<base64>","value":"<base64>","client_id":N,"seq":N}` returns `{"index":N,"swapped":true}`
 
 `value` and `expected` are standard base64. The stored bytes are the decoded value. A value that is not valid base64 is a 400.
-- `POST /v1/join` with `{"id":"...","raft_addr":"ip:port","http_addr":"http://host:port"}` returns 204 from the leader
+- `POST /v1/join` with `{"id":"...","raft_addr":"ip:port","http_addr":"http://host:port","replace":false}` returns 204 from the leader. An id already at another address returns 409 unless `replace` is true. `replace` is optional.
 
 `cas` prints the index and `true` or `false`. A false result is a completed compare that left the key unchanged.

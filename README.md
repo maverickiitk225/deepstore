@@ -41,7 +41,7 @@ Client commands use `http://127.0.0.1:7000` unless you pass `-addr`.
 | `GET` | `/v1/keys/{key}` | | `{"value":"<base64>"}`, or 404 |
 | `DELETE` | `/v1/keys/{key}` | `{"client_id":N,"seq":N}` | `{"index":N}` |
 | `POST` | `/v1/keys/{key}/cas` | `{"expected":"<base64>","value":"<base64>","client_id":N,"seq":N}` | `{"index":N,"swapped":true}` |
-| `POST` | `/v1/join` | `{"id":"...","raft_addr":"ip:port","http_addr":"http://host:port"}` | 204 |
+| `POST` | `/v1/join` | `{"id":"...","raft_addr":"ip:port","http_addr":"http://host:port","replace":false}` | 204, or 409 when the id is at another address |
 
 `value` and `expected` are standard base64. The stored bytes are the decoded value, including bytes that are not valid UTF-8. A value that is not valid base64 is a 400.
 

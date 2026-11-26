@@ -52,9 +52,10 @@ func serve(args []string) int {
 	raftAddr := fs.String("raft-addr", "127.0.0.1:7001", "raft bind address, including an IP")
 	bootstrap := fs.Bool("bootstrap", false, "form a new cluster when the data directory is empty")
 	join := fs.String("join", "", "http address of a node in an existing cluster")
+	replace := fs.Bool("replace", false, "with -join, move this node id to -raft-addr when the cluster has it at another address")
 	every := fs.Uint64("snapshot-every", node.DefaultSnapshotThreshold, "raft log entries between snapshots (0 disables)")
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: deepstore serve -data-dir DIR [-listen ADDR] [-node-id ID] [-raft-addr IP:PORT] [-bootstrap] [-join URL] [-snapshot-every N]\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: deepstore serve -data-dir DIR [-listen ADDR] [-node-id ID] [-raft-addr IP:PORT] [-bootstrap] [-join URL [-replace]] [-snapshot-every N]\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -105,7 +106,7 @@ func serve(args []string) int {
 	httpAddr := advertiseURL(*listen)
 	if *join != "" {
 		fmt.Fprintf(os.Stderr, "joining %s\n", *join)
-		if err := joinCluster(ctx, nd, *join, *nodeID, httpAddr); err != nil {
+		if err := joinCluster(ctx, nd, *join, *nodeID, httpAddr, *replace); err != nil {
 			fmt.Fprintf(os.Stderr, "join: %v\n", err)
 			_ = nd.Close()
 			return 1
@@ -200,16 +201,29 @@ func joinPeerReachable(raw string) (bool, error) {
 	return true, nil
 }
 
-func joinCluster(ctx context.Context, nd *node.Node, leader, id, httpAddr string) error {
+// joinCluster joins the cluster at leader.
+// For a node with existing state, join errors are logged and ignored, except a conflict.
+func joinCluster(ctx context.Context, nd *node.Node, leader, id, httpAddr string, replace bool) error {
 	if nd.HasExistingState() {
 		joinCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
-		if err := node.Join(joinCtx, leader, id, nd.RaftAddr(), httpAddr); err != nil {
+		err := node.Join(joinCtx, leader, id, nd.RaftAddr(), httpAddr, replace)
+		if errors.Is(err, errs.ErrConflict) {
+			return conflictHint(err)
+		}
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "join: %v\n", err)
 		}
 		return nil
 	}
-	return node.Join(ctx, leader, id, nd.RaftAddr(), httpAddr)
+	return conflictHint(node.Join(ctx, leader, id, nd.RaftAddr(), httpAddr, replace))
+}
+
+func conflictHint(err error) error {
+	if errors.Is(err, errs.ErrConflict) {
+		return fmt.Errorf("%w (use a different -node-id, or pass -replace if this server moved)", err)
+	}
+	return err
 }
 
 func advertiseWhenLeader(ctx context.Context, nd *node.Node, httpAddr string) {
@@ -363,7 +377,7 @@ func clientFlags(name string) (*flag.FlagSet, *string) {
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `Usage:
-  deepstore serve -data-dir DIR [-listen ADDR] [-node-id ID] [-raft-addr IP:PORT] [-bootstrap] [-join URL] [-snapshot-every N]
+  deepstore serve -data-dir DIR [-listen ADDR] [-node-id ID] [-raft-addr IP:PORT] [-bootstrap] [-join URL [-replace]] [-snapshot-every N]
   deepstore put [-addr URL] KEY VALUE
   deepstore get [-addr URL] KEY
   deepstore delete [-addr URL] KEY

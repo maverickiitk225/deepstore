@@ -11,3 +11,6 @@ var ErrSession = errors.New("session")
 var ErrUnavailable = errors.New("wal: log unavailable")
 
 var ErrNotLeader = errors.New("not leader")
+
+// ErrConflict means the server id is already used by a different address.
+var ErrConflict = errors.New("conflict")

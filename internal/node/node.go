@@ -252,7 +252,9 @@ func (n *Node) LeaderHTTP() string {
 // raftAddr must already be accepting connections.
 // httpAddr is the address clients should use for that server.
 // This returns after the new server is a voter.
-func (n *Node) AddServer(id, raftAddr, httpAddr string) error {
+// If id is already used by a different address, it returns errs.ErrConflict.
+// With replace set, id is moved to raftAddr instead. This server's own id can't be replaced.
+func (n *Node) AddServer(id, raftAddr, httpAddr string, replace bool) error {
 	httpAddr, err := normalizeHTTP(httpAddr)
 	if err != nil {
 		return err
@@ -265,10 +267,17 @@ func (n *Node) AddServer(id, raftAddr, httpAddr string) error {
 		return fmt.Errorf("node: id is required")
 	}
 	if id == n.id && raftAddr != n.RaftAddr() {
-		return fmt.Errorf("node: id %s is this server at %s", id, n.RaftAddr())
+		return fmt.Errorf("node: %w: id %s is this server at %s and cannot be replaced", errs.ErrConflict, id, n.RaftAddr())
 	}
 	if n.raft.State() != raft.Leader {
 		return fmt.Errorf("node: %w", errs.ErrNotLeader)
+	}
+	addr, found, err := n.serverAddr(id)
+	if err != nil {
+		return err
+	}
+	if found && addr != raftAddr && !replace {
+		return fmt.Errorf("node: %w: id %s is already a server at %s", errs.ErrConflict, id, addr)
 	}
 	already, err := n.isVoter(id, raftAddr)
 	if err != nil {
@@ -349,6 +358,20 @@ func (n *Node) isVoter(id, addr string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// serverAddr returns the Raft address of id in the configuration.
+func (n *Node) serverAddr(id string) (string, bool, error) {
+	fut := n.raft.GetConfiguration()
+	if err := fut.Error(); err != nil {
+		return "", false, err
+	}
+	for _, server := range fut.Configuration().Servers {
+		if string(server.ID) == id {
+			return string(server.Address), true, nil
+		}
+	}
+	return "", false, nil
 }
 
 func (n *Node) waitVoter(ctx context.Context, id, addr string) error {
